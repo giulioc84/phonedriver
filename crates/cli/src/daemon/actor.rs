@@ -24,6 +24,7 @@ use phonedriver_core::raw::{NodeFlags, RawTree};
 use phonedriver_core::render::{
     AppLine, DeviceLine, Filters, Header, Orientation, Rendered, SettleLine, plural, quote,
 };
+use phonedriver_core::scope::AppScope;
 use phonedriver_core::settings::{SettingOp, SettingReply};
 use phonedriver_core::settle::{Config, Detector, Input, State};
 use phonedriver_core::similar::{SUGGEST_WITHIN, normalized_distance};
@@ -35,6 +36,7 @@ use super::DeviceSource;
 use super::checkbox;
 use super::journal::{self, Kept};
 use super::ledger::{Entry, Ledger};
+use super::scope::ScopedDevice;
 use super::secrets::Secrets;
 use super::session::{Resolved, Session};
 use super::shell;
@@ -180,6 +182,7 @@ pub fn spawn(
     home: PathBuf,
     secrets: Arc<Secrets>,
     ledger: Arc<Ledger>,
+    scope: Option<Arc<AppScope>>,
 ) -> mpsc::Sender<Job> {
     let (tx, rx) = mpsc::channel(32);
     let actor = Actor {
@@ -204,6 +207,7 @@ pub fn spawn(
         recording: None,
         secrets,
         ledger,
+        scope,
     };
     tokio::spawn(actor.run(rx));
     tx
@@ -349,6 +353,7 @@ struct Actor {
     recording: Option<Taping>,
     secrets: Arc<Secrets>,
     ledger: Arc<Ledger>,
+    scope: Option<Arc<AppScope>>,
 }
 
 macro_rules! own_app_hint {
@@ -380,7 +385,12 @@ async fn next_signal(live: &mut Option<Live>) -> Signal {
 /// from its pixels either (a game, a canvas, or a host with no text recognition).
 fn nothing_to_act_on(s: &Session) -> bool {
     s.last.as_ref().is_some_and(|last| {
-        tree_is_hollow(last) && !last.elements.iter().any(|e| e.source == Source::Ocr)
+        let outside = last
+            .header
+            .app
+            .as_ref()
+            .is_some_and(|a| a.name.as_deref() == Some(phonedriver_core::scope::OUTSIDE_NAME));
+        !outside && tree_is_hollow(last) && !last.elements.iter().any(|e| e.source == Source::Ocr)
     })
 }
 
@@ -548,7 +558,10 @@ impl Actor {
         self.live = None;
         self.awake = None;
         self.guard_view = None;
-        let device = self.source.connect_on(&self.id, display).await?;
+        let mut device = self.source.connect_on(&self.id, display).await?;
+        if let Some(scope) = &self.scope {
+            device = Arc::new(ScopedDevice::new(device, scope.clone()));
+        }
         let frames = device
             .frames()
             .unwrap_or_else(|| watch::channel(FrameRef::default()).1);
@@ -588,7 +601,7 @@ impl Actor {
             let hidden_display = self.live.as_ref().and_then(|l| l.device.hidden_display());
             return Ok(match &self.lease {
                 Some(l) => {
-                    json!({"session": l.session, "idle_s": l.last_call.elapsed().as_secs(), "hidden_display": hidden_display})
+                    json!({"session": l.session, "idle_s": l.last_call.elapsed().as_secs(), "live": !l.terminal || l.last_call.elapsed() < TERMINAL_HOLD, "hidden_display": hidden_display})
                 }
                 None => json!({"hidden_display": hidden_display}),
             });
@@ -639,6 +652,18 @@ impl Actor {
             .ok_or_else(|| Error::DeviceGone {
                 id: self.id.clone(),
             })
+    }
+
+    fn find_app<'a>(&self, installed: &'a [App], query: &str) -> Result<&'a App, Error> {
+        find_app(installed, query).map_err(|e| match (&self.scope, e) {
+            (Some(scope), Error::NoApp { query, .. }) => Error::Refused {
+                detail: format!(
+                    "no app named \"{query}\" is in the app scope ({}): phonedriver lists, launches and changes only those apps. Name one of them; the scope is the person's setting (PHONEDRIVER_APP_SCOPE)",
+                    scope.list()
+                ),
+            },
+            (_, e) => e,
+        })
     }
 
     fn need(&self, cap: Capabilities, op: Op, reason: &'static str) -> Result<(), Error> {
@@ -817,7 +842,7 @@ impl Actor {
             reason: "this action needs the app's name or id",
         })?;
         let installed = device.apps().await?;
-        let found = find_app(&installed, &query)?.clone();
+        let found = self.find_app(&installed, &query)?.clone();
         let Some(op) = op else {
             if p.action == "notify" {
                 let payload = p.payload.ok_or(Error::Unsupported {
@@ -1058,7 +1083,7 @@ impl Actor {
     async fn logs(&mut self, s: &mut Session, p: LogsParams) -> Result<Value, Error> {
         let device = self.device()?;
         let app = match p.app {
-            Some(name) => find_app(&device.apps().await?, &name)?.id.clone(),
+            Some(name) => self.find_app(&device.apps().await?, &name)?.id.clone(),
             None => {
                 let now = self.fresh(s).await?;
                 let front = now.header.app.as_ref().map(|a| a.id.clone());
@@ -1464,21 +1489,27 @@ impl Actor {
         let nodes = prune(tree);
         let refs = s.refs.assign(tree, &nodes);
         let alerts = phonedriver_core::alert::find(tree, screen);
-        let app = tree
-            .windows
-            .iter()
-            .filter(|w| !alerts.iter().any(|(id, _)| *id == w.id))
-            .find(|w| w.kind == "application" && w.package.is_some())
-            .and_then(|w| w.package.clone())
-            .map(|id| {
-                let name = self
-                    .names
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&id)
-                    .cloned();
-                AppLine { id, name }
-            });
+        let app = match tree.outside.first() {
+            Some(o) => Some(AppLine {
+                id: o.package.clone().unwrap_or_else(|| "unknown".into()),
+                name: Some(phonedriver_core::scope::OUTSIDE_NAME.into()),
+            }),
+            None => tree
+                .windows
+                .iter()
+                .filter(|w| !alerts.iter().any(|(id, _)| *id == w.id))
+                .find(|w| w.kind == "application" && w.package.is_some())
+                .and_then(|w| w.package.clone())
+                .map(|id| {
+                    let name = self
+                        .names
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&id)
+                        .cloned();
+                    AppLine { id, name }
+                }),
+        };
         let keyboard = tree
             .windows
             .iter()
@@ -2127,6 +2158,15 @@ impl Actor {
         let prepared = self.prepare(&p.action).await;
         self.lap("prepare", t);
         let (woke, unlocked) = prepared?;
+        if let Some(scope) = self.scope.clone()
+            && !matches!(&p.action, Action::Launch { .. } | Action::Open { .. })
+            && !matches!(&p.action, Action::Press { key } if matches!(key.as_str(), "back" | "home" | "lock"))
+        {
+            let outside = self.device()?.tree().await?.outside;
+            if !outside.is_empty() {
+                return Err(super::scope::refusal(&scope, &outside, "this action"));
+            }
+        }
         if !matches!(
             &p.action,
             Action::Tap {
@@ -2458,7 +2498,7 @@ impl Actor {
                 let t = Instant::now();
                 let installed = device.apps().await?;
                 self.lap("apps", t);
-                let found = find_app(&installed, &app)?;
+                let found = self.find_app(&installed, &app)?;
                 if !grant.is_empty() {
                     if self.physical() && !self.installed_by_us(&*device, &found.id).await? {
                         return Err(Error::Unsupported {
@@ -2551,7 +2591,7 @@ impl Actor {
                     .map(Duration::from_millis)
                     .or(Config::launch().expect_change);
                 let target = match &app {
-                    Some(name) => Some(find_app(&device.apps().await?, name)?.id.clone()),
+                    Some(name) => Some(self.find_app(&device.apps().await?, name)?.id.clone()),
                     None => None,
                 };
                 let leaving = device.foreground().await?;
@@ -3770,7 +3810,7 @@ impl Actor {
             });
         }
         let app = match app {
-            Some(name) => Some(find_app(&device.apps().await?, name)?.id.clone()),
+            Some(name) => Some(self.find_app(&device.apps().await?, name)?.id.clone()),
             None => None,
         };
         let timeout = timeout_ms.map_or(Config::action().timeout, Duration::from_millis);

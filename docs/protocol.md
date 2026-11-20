@@ -24,6 +24,7 @@ Progress: a client that sends `"progress": true` in `hello` may receive notifica
 | `hello` | `version, client, progress?` | `version, pid` |
 | `shutdown` | none | `{pid}` (the daemon exits, ending the iOS runners it started) |
 | `devices` | none | `[DeviceSummary]` |
+| `hidden` | `ids?` | `{count, ids}`: the devices the device list hides (D101); `ids` adds ids of devices that are not ready, judged by id alone. For the CLI and `doctor`; not an MCP tool |
 | `boot` | `name?` | without `name`: `{off: [DeviceSummary]}`, the devices that are off and can be started, the ones to prefer first. With `name` (a model, any case, or an id): `{id, model, os}` once it is listed, with `already: true` when a connected device has the name; `Refused` when nothing off has it (decisions D77, D79). For an Android virtual device the id in the list is `avd:<name>` and the id in the reply is the serial it booted as, `android:emulator-<port>` |
 | `release` | `device?` | `{}` |
 | `told` | `line` | `{same}` (records `line` as the device line the session was last shown; `same` is true when it already was. The CLI drops a repeated line from its text output, never from `--json`; no device, no lease) |
@@ -45,7 +46,7 @@ Progress: a client that sends `"progress": true` in `hello` may receive notifica
 | `clipboard` | `device?, set?: string` | `{text?: string}` (`{}` after a set; `text` is null when the clipboard is empty) |
 | `health` | `device?` | `{id, model, os, frames_ms}` (what `doctor` needs: connects, reads the tree once, then waits up to 1 s for the next frame; `frames_ms` is null when none came or the device has no frame stream) |
 
-`hello` takes `client` (`cli`, `bench` or `mcp`); the daemon ends the leases of every session an `mcp` connection used when it closes. `devices` entries carry `lease_idle_s` beside `leased_by`; `DeviceBusy` carries `idle_s` and `expires_s`.
+`hello` takes `client` (`cli`, `bench` or `mcp`); the daemon ends the leases of every session an `mcp` connection used when it closes. `devices` entries carry `lease_idle_s` beside `leased_by`, and `lease_live: true` while that lease will not lapse for another session (an MCP session's, or a command line's within 30 s of its last call); `DeviceBusy` carries `idle_s` and `expires_s`.
 
 `device` is omitted when exactly one device is connected or a default is set. Every device method also takes `session` (string, default `"default"`); refs, diff baselines and leases belong to the session, not to the socket connection (architecture section 5).
 
@@ -138,6 +139,7 @@ JSON-RPC `error` with `code` from the table, `message`, and `data: {code_name, h
 | -32008 | ambiguous |
 | -32009 | off_screen (`data.behind_keyboard` is true when the keyboard covers the element; `data.covered_by` names a floating toolbar that covers it) |
 | -32010 | version_mismatch |
+| -32039 | scope_mismatch (`hello` asks for an app scope the daemon was not started with; run `phonedriver daemon stop`; decision D102) |
 | -32011 | unsupported |
 | -32012 | not_settled |
 | -32013 | timeout |

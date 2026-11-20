@@ -20,6 +20,7 @@ use crate::daemon::{Config, Daemon, socket};
 use phonedriver_core::device::DisplayMode;
 use phonedriver_core::error::{Category, span};
 use phonedriver_core::render::plural;
+use phonedriver_core::scope::AppScope;
 
 use crate::variables;
 use crate::wire::{
@@ -556,8 +557,12 @@ pub(crate) enum Verb {
         #[arg(long, env = "PHONEDRIVER_TRACE_SCREENS", value_parser = BoolishValueParser::new())]
         trace_screens: bool,
     },
-    /// Check adb, Android devices and their agent, Xcode, booted simulators and their runners, attached iPhones, and the daemon socket; each line says ok, warn or fail, with a fix. With `--device`, only that device is probed.
-    Doctor,
+    /// Check adb, Android devices and their agent, Xcode, booted simulators and their runners, attached iPhones, and the daemon socket; each line says ok, warn or fail, with a fix. Emulators and Simulators that no live session holds are probed; a physical phone or tablet, or a device another session holds, is listed and left alone. With `--device`, only that device is probed.
+    Doctor {
+        /// Also probe physical phones and tablets, which are otherwise only listed. A device another live session holds is still left alone unless `--device` names it.
+        #[arg(long)]
+        all_devices: bool,
+    },
     /// Pair an Android 11+ phone over Wi-Fi with a QR code.
     ///
     /// Shows a QR code. On the phone open Developer options > Wireless debugging > Pair device with QR code and scan it; the phone is paired and connected. Needs adb's mDNS and the phone on the same Wi-Fi; otherwise pair with the code (see docs/reference.md).
@@ -720,8 +725,8 @@ pub fn run(cli: Cli) -> ExitCode {
                 ExitCode::from(1)
             }
         }
-        Verb::Doctor => {
-            if crate::doctor::run(&socket::home(), cli.device.as_deref()) {
+        Verb::Doctor { all_devices } => {
+            if crate::doctor::run(&socket::home(), cli.device.as_deref(), all_devices) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -976,13 +981,21 @@ pub(crate) async fn execute_with(
             if g.json {
                 return Ok(result.to_string());
             }
-            if result.as_array().is_some_and(Vec::is_empty) {
-                return Ok(no_devices(&client.call("boot", json!({})).await?));
+            let hidden = client.call("hidden", json!({})).await?["count"]
+                .as_u64()
+                .unwrap_or(0);
+            let mut out = if result.as_array().is_some_and(Vec::is_empty) {
+                no_devices(&client.call("boot", json!({})).await?)
+            } else {
+                with_default_device(device_table(&result), g.device.as_deref())
+            };
+            if hidden > 0 {
+                out.push_str(&format!(
+                    "\n{hidden} {} hidden by the device list",
+                    if hidden == 1 { "device" } else { "devices" }
+                ));
             }
-            Ok(with_default_device(
-                device_table(&result),
-                g.device.as_deref(),
-            ))
+            Ok(out)
         }
         Verb::Boot { name } => {
             let result = client.call("boot", json!({"name": name})).await?;
@@ -1412,7 +1425,7 @@ pub(crate) async fn execute_with(
         #[cfg(feature = "android")]
         Verb::Pair | Verb::Untether => Ok(String::new()),
         Verb::Daemon { .. }
-        | Verb::Doctor
+        | Verb::Doctor { .. }
         | Verb::Init { .. }
         | Verb::Ios { .. }
         | Verb::Mcp
@@ -2808,6 +2821,17 @@ fn run_daemon(trace: TraceOptions) -> ExitCode {
         eprintln!("error: cannot start the async runtime");
         return ExitCode::from(1);
     };
+    let app_scope = match AppScope::parse(
+        &std::env::var("PHONEDRIVER_APP_SCOPE").unwrap_or_default(),
+    ) {
+        Ok(scope) => scope,
+        Err(why) => {
+            eprintln!(
+                "error: PHONEDRIVER_APP_SCOPE {why}: list packages such as com.example.app,com.example.other"
+            );
+            return ExitCode::from(1);
+        }
+    };
     rt.block_on(async {
         let sources = Sources(vec![
             #[cfg(feature = "android")]
@@ -2822,6 +2846,8 @@ fn run_daemon(trace: TraceOptions) -> ExitCode {
             },
             trace,
             apps_under_test(std::env::var("PHONEDRIVER_APPS_UNDER_TEST").ok().as_deref()),
+            crate::daemon::policy::Policy::from_env(&socket::home()),
+            app_scope,
         );
         let listener = match socket::listen(&socket::socket_path()).await {
             Ok(l) => l,

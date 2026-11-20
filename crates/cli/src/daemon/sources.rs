@@ -133,4 +133,11 @@ impl DeviceSource for Sources {
             .find(|(prefix, _)| id.starts_with(prefix))
             .and_then(|(_, s)| s.blocker(id))
     }
+
+    async fn hardware_serial(&self, id: &str) -> Result<Option<String>, Error> {
+        match self.0.iter().find(|(prefix, _)| id.starts_with(prefix)) {
+            Some((_, source)) => source.hardware_serial(id).await,
+            None => Ok(None),
+        }
+    }
 }

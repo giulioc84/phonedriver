@@ -34,6 +34,7 @@ pub struct AdbSource {
     tracked: Arc<Mutex<Tracked>>,
     os: Mutex<HashMap<OsKey, Option<String>>>,
     hardware: Mutex<HashMap<OsKey, Option<String>>>,
+    serials: Mutex<HashMap<OsKey, String>>,
 }
 
 impl AdbSource {
@@ -47,6 +48,7 @@ impl AdbSource {
             tracked: Arc::default(),
             os: Mutex::default(),
             hardware: Mutex::default(),
+            serials: Mutex::default(),
         }
     }
 
@@ -304,6 +306,34 @@ impl DeviceSource for AdbSource {
     /// another connection of the same phone still resolves.
     async fn list_for(&self, requested: Option<&str>) -> Result<Vec<Listed>, Error> {
         self.listed(requested.is_none()).await
+    }
+
+    /// Always the phone's `ro.serialno`, read once per connection: an emulator's adb name (`emulator-5554`) and a
+    /// phone's adb name over Wi-Fi (`192.168.1.20:5555`) are not it, and `adb devices` over USB shows it only usually.
+    async fn hardware_serial(&self, id: &str) -> Result<Option<String>, Error> {
+        let serial = id.strip_prefix("android:").unwrap_or(id);
+        let device = self
+            .devices()
+            .await?
+            .into_iter()
+            .find(|d| d.serial == serial)
+            .ok_or_else(|| Error::DeviceGone { id: id.to_string() })?;
+        let key = (device.serial.clone(), device.transport_id);
+        let known = self
+            .serials
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+        if let Some(s) = known {
+            return Ok(Some(s));
+        }
+        let read = self.adb.hardware_serial(&device.serial).await?;
+        self.serials
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, read.clone());
+        Ok(Some(read))
     }
 
     async fn connect(&self, id: &str) -> Result<Arc<dyn Device>, Error> {

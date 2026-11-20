@@ -4,7 +4,7 @@ nav: Real Android phone
 meta: Turn on USB or Wi-Fi debugging, connect an Android phone and let an agent operate it with phonedriver. What has and has not been tested.
 description: Turn on USB debugging or Wi-Fi debugging, connect an Android phone or tablet, and let an agent operate it with phonedriver. Notes on what has and has not been tested.
 seo: How to let an AI agent control a real Android phone over MCP
-updated: 2026-11-17
+updated: 2026-11-20
 ---
 
 Plug in an Android phone or tablet with USB debugging on, and phonedriver can drive it. No app is installed on the phone, and no accessibility service has to be switched on. It is the same code path as the emulator, and it has been tested on one physical phone, a HONOR X8 ([what was tested](#what-has-been-tested)).
@@ -17,8 +17,10 @@ Plug in an Android phone or tablet with USB debugging on, and phonedriver can dr
 
 ```sh
 phonedriver devices
-phonedriver doctor
+phonedriver doctor --device android:<serial>
 ```
+
+`doctor` without `--device` lists the phone but does not start the agent on it.
 
 The phone appears as `android:<serial>`. The daemon pushes a small agent over adb and starts it as the shell user.
 
@@ -59,6 +61,18 @@ phonedriver keeps the phone awake while it is in use: for 10 minutes after each 
 ## Safety on a real phone
 
 A physical Android device refuses wipes and removing apps phonedriver did not install, unless the command passes `--force`. For an app you are developing, name its package in `PHONEDRIVER_APPS_UNDER_TEST` in the environment the daemon starts with, and `apps clear`, `uninstall`, `grant` and `revoke` work on it ([how](/docs/claude-code/#an-app-you-are-developing)). The [approval guard](/docs/approval-guard/) is on by default, which matters more on a phone with real accounts than on an emulator. Do not hand an agent a phone with a payment app signed in until you have read what the guard does not catch.
+
+## Keep the agent in your app
+
+`PHONEDRIVER_APP_SCOPE=com.example.app,com.example.other` in the environment the daemon starts with limits the agent to those apps. It does not need a wiped phone, but it is not a sandbox.
+
+- A screen of another app (the home screen too) reads as `app <package> (outside the app scope)` with no elements, and `snapshot`, `find`, `wait` and OCR show none of its text. Traces and saved steps hold only what the agent was shown.
+- `tap`, `type`, `swipe`, `scroll`, `clipboard set` and the other actions are refused while another app's window is on screen, a heads-up notification included. `press back`, `press home` and `launch` of an app in the scope still work.
+- `screenshot` is refused while a window of another app is on screen, because a picture cannot be cut by window.
+- `shell`, `record`, `clipboard get`, `press recents` and `press notifications` are refused. `apps` lists only your apps, and `launch`, `logs` and app changes refuse the rest. `open` needs `--app` with one of your packages.
+- The system's permission and install dialogs, the VPN consent dialog and the keyboard stay usable.
+
+Not covered: the package name of the app in front is shown, notification icons and the keyboard's suggestions appear in a screenshot, an app of yours can open another app before phonedriver sees it (what follows is hidden), a share sheet from an unusual maker may be let through as a dialog, and an iPhone takes no screenshot under a scope. The daemon reads the list when it starts: run `phonedriver daemon stop` after changing it. [The reference](https://github.com/hridaya423/phonedriver/blob/main/docs/reference.md#app-scope) has the full list.
 
 ## Questions
 

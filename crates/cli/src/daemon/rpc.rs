@@ -9,6 +9,7 @@ pub const INVALID_REQUEST: i32 = -32600;
 pub const METHOD_NOT_FOUND: i32 = -32601;
 pub const INVALID_PARAMS: i32 = -32602;
 pub const VERSION_MISMATCH: i32 = -32010;
+pub const SCOPE_MISMATCH: i32 = -32039;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RpcError {

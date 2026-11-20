@@ -301,6 +301,9 @@ pub struct DeviceEntry {
     /// Seconds since the leasing session last called.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_idle_s: Option<u64>,
+    /// The lease will not yield to another session by lapsing: an MCP server's, or a command line's within `TERMINAL_HOLD`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lease_live: bool,
     /// The virtual display the live device works on, when it works on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_display: Option<u32>,

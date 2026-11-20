@@ -39,7 +39,7 @@ phonedriver devices
 phonedriver doctor
 ```
 
-The emulator appears as `android:emulator-5554`. `doctor` checks adb, the agent, UiAutomation and the video stream, and says how to fix whatever is not `ok`.
+The emulator appears as `android:emulator-5554`. `doctor` probes emulators that no other session holds, and checks adb, the agent, UiAutomation and the video stream, and says how to fix whatever is not `ok`.
 
 ## Drive it
 

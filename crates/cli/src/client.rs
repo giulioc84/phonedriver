@@ -4,6 +4,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use phonedriver_core::scope::AppScope;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf, split};
 use tokio::time::timeout;
@@ -20,7 +21,18 @@ const READY_WAIT: Duration = Duration::from_secs(3);
 /// follow carry this client's session, so the two must match.
 fn hello(kind: &str, session: &str) -> Value {
     let progress = kind == "cli" && std::io::stderr().is_terminal();
-    json!({"version": VERSION, "client": kind, "progress": progress, "session": session})
+    json!({"version": VERSION, "client": kind, "progress": progress, "session": session, "app_scope": app_scope()})
+}
+
+/// The app scope this client's environment sets, normalized, so the daemon can refuse to serve a client that asked
+/// for a scope it was not started with (decision D102). Text that names no app is sent as it is.
+fn app_scope() -> String {
+    let set = std::env::var("PHONEDRIVER_APP_SCOPE").unwrap_or_default();
+    match AppScope::parse(&set) {
+        Ok(Some(scope)) => scope.list(),
+        Ok(None) => String::new(),
+        Err(_) => set,
+    }
 }
 
 /// Why a command failed: the daemon said so, or the CLI could not reach it.

@@ -288,7 +288,7 @@ pub fn run(home: &Path, dry_run: bool, register_only: bool) -> ExitCode {
     let failed = agents.iter().any(|(_, o)| matches!(o, Outcome::Failed(_)));
     if !register_only && !dry_run {
         println!();
-        crate::doctor::run(home, None);
+        crate::doctor::run(home, None, false);
     }
     if failed {
         ExitCode::from(1)

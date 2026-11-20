@@ -3,7 +3,7 @@ title: How to use phonedriver with VS Code and GitHub Copilot
 seo: How to let GitHub Copilot in VS Code control a phone over MCP
 nav: VS Code
 description: Add phonedriver to VS Code as an MCP server with one command or a .vscode/mcp.json entry, so GitHub Copilot can operate an Android phone or iPhone.
-updated: 2026-11-18
+updated: 2026-11-20
 date: 2026-11-14
 ---
 
@@ -34,7 +34,9 @@ Put this in `.vscode/mcp.json`. In VS Code the top key is `servers`, where most 
 }
 ```
 
-To let the agent clear, remove or change the permissions of an app you are developing on a physical Android phone (an app Gradle installed, not phonedriver), add `"PHONEDRIVER_APPS_UNDER_TEST": "com.example.app"` to `env`, and run `phonedriver daemon stop` once if a daemon is running.
+To keep the agent in your own app on a phone with real accounts, add `"PHONEDRIVER_APP_SCOPE": "com.example.app"` to `env` ([what it covers](/docs/android-phone/#keep-the-agent-in-your-app)). To let the agent clear, remove or change the permissions of an app you are developing on a physical Android phone (an app Gradle installed, not phonedriver), add `"PHONEDRIVER_APPS_UNDER_TEST": "com.example.app"` to `env`, and run `phonedriver daemon stop` once if a daemon is running.
+
+To keep a phone out of the agent's reach on a shared adb server, add `"PHONEDRIVER_DENY_DEVICES": "android:<id>"` to `env` (or write `deny android:<id>` in `~/.phonedriver/devices`, which every agent on the machine obeys); a denied device is not listed, not probed by `doctor` and never gets the agent.
 
 `PHONEDRIVER_DEVICE` is optional when one device is connected. `phonedriver devices` lists the ids. On Windows, if VS Code cannot start `npx` directly, use `"command": "cmd"` with `"args": ["/c", "npx", "-y", "phonedriver", "mcp"]`.
 

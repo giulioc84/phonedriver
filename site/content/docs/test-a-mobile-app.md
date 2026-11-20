@@ -4,7 +4,7 @@ seo: How to have Claude Code test an Android or iOS app on a device
 nav: Test your app
 description: Install a build on an emulator, the iOS Simulator or a phone, and ask Claude Code or Codex to use the app and report bugs with steps. What was measured, and notes for React Native, Expo and Flutter.
 meta: Install a build on an emulator, simulator or phone and ask Claude Code or Codex to use your app and report bugs with steps. What was measured and what was not.
-updated: 2026-11-17
+updated: 2026-11-20
 date: 2026-11-14
 ---
 
@@ -20,6 +20,8 @@ phonedriver launch "My App" --restart
 ```
 
 On Android the file is an APK. On the iOS Simulator it is the `.app` folder your build produces. Installing on a physical iPhone is not implemented, so install there with Xcode and let the agent open the app. The path is read on the machine that runs the daemon. Over MCP the same actions are the `apps` and `launch` tools, so the agent can do this step itself.
+
+On a phone with real accounts on it, set `PHONEDRIVER_APP_SCOPE=com.example.app` in the MCP server's `env` so the agent reads and touches only your app ([what it covers](/docs/android-phone/#keep-the-agent-in-your-app)).
 
 Three options that help a test run:
 

@@ -440,6 +440,15 @@ impl Rendered {
         if !parts.is_empty() {
             lines.push(parts.join(" · "));
         }
+        if h.app
+            .as_ref()
+            .is_some_and(|a| a.name.as_deref() == Some(crate::scope::OUTSIDE_NAME))
+        {
+            lines.push(
+                "nothing from it is shown or touched: `press back` or `press home`, then `launch` an app in the scope"
+                    .into(),
+            );
+        }
         for a in &h.alerts {
             lines.push(match &a.title {
                 Some(t) => format!("alert {}: {}", a.package, quote(t)),

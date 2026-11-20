@@ -78,8 +78,145 @@ fn wants(only: Option<&str>, id: &str) -> bool {
     only.is_none_or(|o| o == id || id.split_once(':').is_some_and(|(_, rest)| rest == o))
 }
 
-/// Runs every check and prints them; with `only`, probes just that device. Fails when any check fails.
-pub fn run(home: &Path, only: Option<&str>) -> bool {
+/// Whether doctor probes a device (starts or replaces its agent, or its runner) or only lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Verdict {
+    Probe,
+    Skip(String),
+}
+
+/// What doctor may touch (D101): the devices the daemon hides are not shown, a device another live session holds is not
+/// probed, and a physical phone or tablet is probed only with `--all-devices` or when `--device` names it.
+#[derive(Debug, Default)]
+pub struct Scope {
+    only: Option<String>,
+    all: bool,
+    hidden: Vec<String>,
+    hidden_count: usize,
+    held: std::collections::HashMap<String, String>,
+    daemon: Option<String>,
+}
+
+fn physical_id(id: &str) -> bool {
+    id.starts_with("ios:") || (id.starts_with("android:") && !id.starts_with("android:emulator-"))
+}
+
+impl Scope {
+    pub fn new(only: Option<&str>, all: bool) -> Scope {
+        Scope {
+            only: only.map(str::to_string),
+            all,
+            ..Scope::default()
+        }
+    }
+
+    pub fn holding(mut self, id: &str, session: &str) -> Scope {
+        self.held.insert(id.into(), session.into());
+        self
+    }
+
+    pub fn hiding(mut self, id: &str) -> Scope {
+        self.hidden.push(id.into());
+        self.hidden_count += 1;
+        self
+    }
+
+    async fn ask(only: Option<&str>, all: bool) -> Scope {
+        let mut scope = Scope::new(only, all);
+        let asked = async {
+            let mut client = Client::connect("doctor".into()).await?;
+            let hidden = client.call("hidden", json!({})).await?;
+            let devices = match only {
+                Some(_) => json!([]),
+                None => client.call("devices", json!({})).await?,
+            };
+            Ok::<_, Failure>((hidden, devices))
+        }
+        .await;
+        match asked {
+            Ok((hidden, devices)) => {
+                scope.hidden = strings(&hidden["ids"]);
+                scope.hidden_count = hidden["count"].as_u64().unwrap_or(0) as usize;
+                for d in devices.as_array().into_iter().flatten() {
+                    if d["lease_live"] == true
+                        && let (Some(id), Some(by)) = (d["id"].as_str(), d["leased_by"].as_str())
+                    {
+                        scope.held.insert(id.into(), by.into());
+                    }
+                }
+            }
+            Err(e) => scope.daemon = Some(e.message()),
+        }
+        scope
+    }
+
+    /// Devices that are not ready (unauthorized, offline) cannot be read for a serial, so the daemon judges them by id.
+    #[cfg(feature = "android")]
+    async fn also_ask_about(&mut self, ids: &[String]) {
+        if ids.is_empty() || self.daemon.is_some() {
+            return;
+        }
+        let Ok(mut client) = Client::connect("doctor".into()).await else {
+            return;
+        };
+        let Ok(reply) = client.call("hidden", json!({"ids": ids})).await else {
+            return;
+        };
+        for id in strings(&reply["ids"]) {
+            if !self.hidden.contains(&id) {
+                self.hidden.push(id);
+                self.hidden_count += 1;
+            }
+        }
+    }
+
+    pub fn is_hidden(&self, id: &str) -> bool {
+        self.hidden.iter().any(|h| h == id)
+    }
+
+    pub fn verdict(&self, id: &str) -> Verdict {
+        if self.only.is_some() {
+            return Verdict::Probe;
+        }
+        if let Some(why) = &self.daemon {
+            return Verdict::Skip(format!(
+                "the daemon did not answer ({why}), so doctor cannot tell whether a session holds it"
+            ));
+        }
+        if let Some(session) = self.held.get(id) {
+            return Verdict::Skip(format!(
+                "session {session} holds it, and probing would take its agent"
+            ));
+        }
+        if physical_id(id) && !self.all {
+            return Verdict::Skip(
+                "a physical device, which doctor leaves alone unless asked".into(),
+            );
+        }
+        Verdict::Probe
+    }
+}
+
+fn strings(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.as_str().map(str::to_string))
+        .collect()
+}
+
+fn not_probed(label: &str, id: &str, why: &str) -> Check {
+    Check::bad(
+        Status::Warn,
+        format!("{label} {id}"),
+        format!("not probed: {why}"),
+        format!("Run `phonedriver doctor --device {id}` to probe it."),
+    )
+}
+
+/// Runs every check and prints them; with `only`, probes just that device, and without it, probes the emulators and
+/// Simulators that no live session holds, plus every device with `all_devices`. Fails when any check fails.
+pub fn run(home: &Path, only: Option<&str>, all_devices: bool) -> bool {
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -88,13 +225,32 @@ pub fn run(home: &Path, only: Option<&str>) -> bool {
         return false;
     };
     let checks = rt.block_on(async {
+        let scope = &mut Scope::ask(only, all_devices).await;
         #[cfg(feature = "android")]
-        let mut checks = android(&Adb::from_env(), only).await;
+        let mut checks = android(&Adb::from_env(), only, scope).await;
         #[cfg(not(feature = "android"))]
         let mut checks = Vec::new();
-        checks.extend(ios(home, only).await);
-        checks.extend(physical(home, only).await);
+        checks.extend(ios(home, only, scope).await);
+        checks.extend(physical(home, only, scope).await);
         checks.extend(socket_permissions(&socket::socket_path()));
+        if let Some(why) = &scope.daemon {
+            checks.push(Check::bad(
+                Status::Warn,
+                "daemon",
+                format!("did not answer: {why}"),
+                "Run `phonedriver daemon` in a terminal and read what it prints; no device was probed.",
+            ));
+        }
+        if scope.hidden_count > 0 {
+            checks.push(Check::ok(
+                "device list",
+                format!(
+                    "{} {} hidden by the device list and not probed",
+                    scope.hidden_count,
+                    if scope.hidden_count == 1 { "device" } else { "devices" }
+                ),
+            ));
+        }
         checks
     });
     print!("{}", render(&checks));
@@ -104,7 +260,7 @@ pub fn run(home: &Path, only: Option<&str>) -> bool {
 /// The Simulator tier: Xcode, booted simulators, the runner build, and each simulator's runner answering
 /// through the daemon. A runner serves one connection and a new one cancels the old, so probing its port directly
 /// would cut off a daemon that holds it; the daemon connects (which says `hello`) and takes one snapshot instead.
-pub async fn ios(home: &Path, only: Option<&str>) -> Vec<Check> {
+pub async fn ios(home: &Path, only: Option<&str>, scope: &Scope) -> Vec<Check> {
     if !cfg!(target_os = "macos") {
         return Vec::new();
     }
@@ -143,7 +299,10 @@ pub async fn ios(home: &Path, only: Option<&str>) -> Vec<Check> {
             Vec::new()
         }
         Ok(mut sims) => {
-            sims.retain(|s| wants(only, &format!("sim:{}", s.udid)));
+            sims.retain(|s| {
+                let id = format!("sim:{}", s.udid);
+                wants(only, &id) && !scope.is_hidden(&id)
+            });
             if !sims.is_empty() || only.is_none() {
                 let names: Vec<String> = sims
                     .iter()
@@ -166,7 +325,15 @@ pub async fn ios(home: &Path, only: Option<&str>) -> Vec<Check> {
             Vec::new()
         }
     };
-    if sims.is_empty() {
+    let (probed, left): (Vec<_>, Vec<_>) = sims
+        .iter()
+        .partition(|s| scope.verdict(&format!("sim:{}", s.udid)) == Verdict::Probe);
+    if probed.is_empty() {
+        checks.extend(left_alone(
+            "runner",
+            left.iter().map(|s| format!("sim:{}", s.udid)),
+            scope,
+        ));
         return checks;
     }
     let started = Instant::now();
@@ -190,16 +357,29 @@ pub async fn ios(home: &Path, only: Option<&str>) -> Vec<Check> {
             return checks;
         }
     }
-    for s in &sims {
+    for s in probed {
         checks.push(runner_answers(&format!("sim:{}", s.udid)).await);
     }
+    checks.extend(left_alone(
+        "runner",
+        left.iter().map(|s| format!("sim:{}", s.udid)),
+        scope,
+    ));
     checks
+}
+
+fn left_alone(label: &str, ids: impl Iterator<Item = String>, scope: &Scope) -> Vec<Check> {
+    ids.filter_map(|id| match scope.verdict(&id) {
+        Verdict::Skip(why) => Some(not_probed(label, &id, &why)),
+        Verdict::Probe => None,
+    })
+    .collect()
 }
 
 /// The adb server at `Adb::from_env()`, then every device it lists. A device in the `device` state is probed through
 /// the daemon, which deploys the agent and holds UiAutomation, so the probe must not start a second agent.
 #[cfg(feature = "android")]
-pub async fn android(adb: &Adb, only: Option<&str>) -> Vec<Check> {
+pub async fn android(adb: &Adb, only: Option<&str>, scope: &mut Scope) -> Vec<Check> {
     let configured = std::env::var("ADB_SERVER_SOCKET").ok();
     let version = adb.version().await;
     let mut checks = vec![adb_server(adb.addr(), configured.as_deref(), &version)];
@@ -218,6 +398,16 @@ pub async fn android(adb: &Adb, only: Option<&str>) -> Vec<Check> {
             return checks;
         }
     };
+    let not_ready: Vec<String> = devices
+        .iter()
+        .filter(|d| d.state != DeviceState::Device)
+        .map(|d| format!("android:{}", d.serial))
+        .collect();
+    scope.also_ask_about(&not_ready).await;
+    let devices: Vec<AdbDevice> = devices
+        .into_iter()
+        .filter(|d| !scope.is_hidden(&format!("android:{}", d.serial)))
+        .collect();
     let devices = match only {
         Some(_) => devices,
         None => phonedriver_android::wireless::connections_per_phone(adb, devices).await,
@@ -256,6 +446,7 @@ pub async fn android(adb: &Adb, only: Option<&str>) -> Vec<Check> {
             .iter()
             .filter(|d| d.state == DeviceState::Device)
             .map(|d| format!("android:{}", d.serial))
+            .filter(|id| scope.verdict(id) == Verdict::Probe)
             .collect();
         if !probed.is_empty() {
             eprintln!(
@@ -272,7 +463,11 @@ pub async fn android(adb: &Adb, only: Option<&str>) -> Vec<Check> {
         let ready = state.status == Status::Ok;
         checks.push(state);
         if ready {
-            checks.extend(agent_checks(&format!("android:{}", d.serial)).await);
+            let id = format!("android:{}", d.serial);
+            match scope.verdict(&id) {
+                Verdict::Probe => checks.extend(agent_checks(&id).await),
+                Verdict::Skip(why) => checks.push(not_probed("agent", &id, &why)),
+            }
         }
     }
     checks
@@ -522,7 +717,7 @@ async fn runner_answers(id: &str) -> Check {
 
 /// Each attached iOS device: paired, Developer Mode, developer disk image, tier and services, and the runner with the
 /// expiry of the profile that signed the local build.
-pub async fn physical(home: &Path, only: Option<&str>) -> Vec<Check> {
+pub async fn physical(home: &Path, only: Option<&str>, scope: &Scope) -> Vec<Check> {
     use phonedriver_core::error::{Error, UserAction};
     use phonedriver_ios::setup::XCODE;
     let attached = match crate::ios_wifi::attached(home).await {
@@ -532,6 +727,10 @@ pub async fn physical(home: &Path, only: Option<&str>) -> Vec<Check> {
         }
         Err(_) => return Vec::new(),
     };
+    let attached: Vec<_> = attached
+        .into_iter()
+        .filter(|d| !scope.is_hidden(&format!("ios:{}", d.udid)))
+        .collect();
     let mut checks = Vec::new();
     if !XCODE && only.is_none_or(|o| o.starts_with("ios:")) {
         checks.push(Check::ok(
@@ -540,9 +739,10 @@ pub async fn physical(home: &Path, only: Option<&str>) -> Vec<Check> {
         ));
     }
     if XCODE
-        && attached
-            .iter()
-            .any(|d| wants(only, &format!("ios:{}", d.udid)))
+        && attached.iter().any(|d| {
+            let id = format!("ios:{}", d.udid);
+            wants(only, &id) && scope.verdict(&id) == Verdict::Probe
+        })
     {
         checks.push(match phonedriver_ios::team::signing_team() {
             Ok(team) => Check::ok("ios signing team", team),
@@ -552,6 +752,10 @@ pub async fn physical(home: &Path, only: Option<&str>) -> Vec<Check> {
     for device in attached {
         let name = format!("ios:{}", device.udid);
         if !wants(only, &name) {
+            continue;
+        }
+        if let Verdict::Skip(why) = scope.verdict(&name) {
+            checks.push(not_probed("device", &name, &why));
             continue;
         }
         let found = match phonedriver_ios::discovery::describe(&device).await {
@@ -914,6 +1118,77 @@ mod tests {
         let check = runner_expiry("iPhone", home.path());
         assert_eq!(check.status, Status::Ok, "{check:?}");
         assert_eq!(check.detail, "signed, profile expires 2999-01-01T00:00:00Z");
+    }
+
+    fn skipped(v: Verdict) -> String {
+        match v {
+            Verdict::Skip(why) => why,
+            Verdict::Probe => panic!("expected the device to be left alone"),
+        }
+    }
+
+    #[test]
+    fn a_physical_phone_is_listed_and_not_probed_unless_asked() {
+        let default = Scope::new(None, false);
+        for id in [
+            "android:R5CT123",
+            "android:192.168.1.20:5555",
+            "ios:00008110-ABC",
+        ] {
+            assert!(skipped(default.verdict(id)).contains("physical"), "{id}");
+        }
+        let all = Scope::new(None, true);
+        assert_eq!(all.verdict("android:R5CT123"), Verdict::Probe);
+        let named = Scope::new(Some("android:R5CT123"), false);
+        assert_eq!(named.verdict("android:R5CT123"), Verdict::Probe);
+        let line = not_probed("agent", "android:R5CT123", "a physical device");
+        assert_eq!(line.status, Status::Warn);
+        assert!(line.detail.starts_with("not probed: "));
+        assert_eq!(
+            line.fix.as_deref(),
+            Some("Run `phonedriver doctor --device android:R5CT123` to probe it.")
+        );
+    }
+
+    #[test]
+    fn an_emulator_or_a_simulator_nobody_holds_is_probed() {
+        let scope = Scope::new(None, false);
+        assert_eq!(scope.verdict("android:emulator-5554"), Verdict::Probe);
+        assert_eq!(scope.verdict("sim:ABCD"), Verdict::Probe);
+    }
+
+    #[test]
+    fn a_device_another_session_holds_is_left_alone_even_with_all_devices() {
+        let held = |all| {
+            Scope::new(None, all)
+                .holding("android:emulator-5554", "4242")
+                .holding("android:R5CT123", "4242")
+        };
+        for all in [false, true] {
+            let scope = held(all);
+            assert!(skipped(scope.verdict("android:emulator-5554")).contains("4242"));
+            assert!(skipped(scope.verdict("android:R5CT123")).contains("4242"));
+            assert_eq!(scope.verdict("android:emulator-5558"), Verdict::Probe);
+        }
+        let named = Scope::new(Some("android:emulator-5554"), false)
+            .holding("android:emulator-5554", "4242");
+        assert_eq!(named.verdict("android:emulator-5554"), Verdict::Probe);
+    }
+
+    #[test]
+    fn a_device_the_list_hides_is_not_shown() {
+        let scope = Scope::new(None, true).hiding("android:R5CT123");
+        assert!(scope.is_hidden("android:R5CT123"));
+        assert!(!scope.is_hidden("android:emulator-5554"));
+    }
+
+    #[test]
+    fn without_the_daemon_nothing_is_probed_unless_named() {
+        let scope = Scope {
+            daemon: Some("no daemon".into()),
+            ..Scope::default()
+        };
+        assert!(skipped(scope.verdict("android:emulator-5554")).contains("no daemon"));
     }
 
     #[test]

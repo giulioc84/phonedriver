@@ -3,7 +3,7 @@ title: How to use phonedriver with Cursor and other MCP clients
 seo: How to let Cursor, Gemini CLI, Zed or Cline control a phone
 nav: Cursor and other clients
 description: Add phonedriver to Cursor, Gemini CLI, Zed, Cline or any MCP client that starts a stdio server, with the entry for each, a device setting and the tools.
-updated: 2026-11-18
+updated: 2026-11-20
 ---
 
 Any client that starts a stdio MCP server can use phonedriver: the command is `npx` with the arguments `-y phonedriver mcp`. [Codex](/docs/codex/) and [VS Code](/docs/vs-code/) have their own pages.
@@ -24,7 +24,9 @@ I test with Claude Code. I have not run a session in Cursor, Gemini CLI, Zed or 
 }
 ```
 
-To let the agent clear, remove or change the permissions of an app you are developing on a physical Android phone (an app Gradle installed, not phonedriver), add `"PHONEDRIVER_APPS_UNDER_TEST": "com.example.app,com.example.other"` to `env`, and run `phonedriver daemon stop` once if a daemon is running.
+To keep the agent in your own app on a phone with real accounts, add `"PHONEDRIVER_APP_SCOPE": "com.example.app"` to `env` ([what it covers](/docs/android-phone/#keep-the-agent-in-your-app)). To let the agent clear, remove or change the permissions of an app you are developing on a physical Android phone (an app Gradle installed, not phonedriver), add `"PHONEDRIVER_APPS_UNDER_TEST": "com.example.app,com.example.other"` to `env`, and run `phonedriver daemon stop` once if a daemon is running.
+
+To keep a phone out of the agent's reach on a shared adb server, add `"PHONEDRIVER_DENY_DEVICES": "android:<id>"` to `env` (or write `deny android:<id>` in `~/.phonedriver/devices`, which every agent on the machine obeys); a denied device is not listed, not probed by `doctor` and never gets the agent.
 
 The first start downloads the binary once. On Windows, some clients cannot start `npx` directly: use `"command": "cmd"` and `"args": ["/c", "npx", "-y", "phonedriver", "mcp"]`. If you installed phonedriver yourself, use `"command": "phonedriver"` with `"args": ["mcp"]`, or the full path. `PHONEDRIVER_DEVICE` is optional when one device is connected.
 

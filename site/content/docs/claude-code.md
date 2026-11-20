@@ -3,7 +3,7 @@ title: How to use phonedriver with Claude Code
 seo: How to let Claude Code control an Android phone or iPhone
 nav: Claude Code
 description: Add phonedriver to Claude Code as an MCP server with one command, point it at a device and ask it to operate a phone in plain language.
-updated: 2026-11-18
+updated: 2026-11-20
 ---
 
 To let Claude Code control an Android phone or an iPhone, add phonedriver as an MCP server with `claude mcp add phonedriver -- npx -y phonedriver mcp`, connect a device and ask in plain language. Claude Code is the client phonedriver is tested against: the benchmarks on this site run `claude -p` with Claude Sonnet 5.5.
@@ -35,7 +35,19 @@ On a physical Android phone, `apps clear`, `uninstall`, `grant` and `revoke` tou
 claude mcp add --env PHONEDRIVER_APPS_UNDER_TEST=com.example.app,com.example.other phonedriver -- npx -y phonedriver mcp
 ```
 
+To keep a phone out of the agent's reach on a shared adb server, add `--env PHONEDRIVER_DENY_DEVICES=android:<id>` the same way (or write `deny android:<id>` in `~/.phonedriver/devices`, which every agent on the machine obeys). A denied device is not listed, not probed by `doctor` and never gets the agent.
+
 The daemon reads the list when it starts, so run `phonedriver daemon stop` once if one is already running. Emulators and Simulators need none of this.
+
+## Keep the agent in your app
+
+On a phone that is signed in to real accounts, name the apps the agent may use. It then sees nothing from any other app, and its taps, typing, screenshots and `shell` are refused while another app is on screen. The home screen counts as another app.
+
+```sh
+claude mcp add --env PHONEDRIVER_APP_SCOPE=com.example.app phonedriver -- npx -y phonedriver mcp
+```
+
+This is not `PHONEDRIVER_APPS_UNDER_TEST`, which only lets the agent clear or uninstall an app of yours. The scope is read when the daemon starts, so run `phonedriver daemon stop` once if one is running, and the agent cannot change it. It is not a sandbox: [what it covers and what it does not](/docs/android-phone/#keep-the-agent-in-your-app).
 
 ## Or install the plugin
 

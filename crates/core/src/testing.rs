@@ -65,6 +65,7 @@ pub struct FakeDevice {
     hidden: Option<u32>,
     shot: Mutex<Option<Image>>,
     shot_failures: Mutex<Vec<Error>>,
+    after_shot: Mutex<Option<Vec<RawTree>>>,
     order: Mutex<Vec<&'static str>>,
     settings: Mutex<Option<FakeSettings>>,
     logs: Mutex<Option<LogReply>>,
@@ -122,6 +123,7 @@ impl FakeDevice {
             hidden: None,
             shot: Mutex::new(None),
             shot_failures: Mutex::new(Vec::new()),
+            after_shot: Mutex::new(None),
             order: Mutex::new(Vec::new()),
             settings: Mutex::new(None),
             logs: Mutex::new(None),
@@ -146,6 +148,12 @@ impl FakeDevice {
     /// The next `screenshot()` calls fail with these errors, in order, before one succeeds.
     pub fn fail_screenshots(&self, errors: Vec<Error>) {
         *lock(&self.shot_failures) = errors.into_iter().rev().collect();
+    }
+
+    /// After the next `screenshot()`, `tree()` returns these in order, then keeps the last: a window that appears
+    /// while the picture is taken.
+    pub fn after_screenshot(&self, trees: Vec<RawTree>) {
+        *lock(&self.after_shot) = Some(trees);
     }
 
     /// The next `text()` calls fail with these errors, in order, before one succeeds.
@@ -374,10 +382,14 @@ impl Device for FakeDevice {
         if let Some(e) = lock(&self.shot_failures).pop() {
             return Err(e);
         }
-        lock(&self.shot).clone().ok_or(Error::Unsupported {
+        let image = lock(&self.shot).clone().ok_or(Error::Unsupported {
             op: Op::Screenshot,
             reason: "FakeDevice has no pixels",
-        })
+        })?;
+        if let Some(trees) = lock(&self.after_shot).take() {
+            *lock(&self.trees) = trees.into_iter().rev().collect();
+        }
+        Ok(image)
     }
 
     fn events(&self) -> broadcast::Receiver<DeviceEvent> {

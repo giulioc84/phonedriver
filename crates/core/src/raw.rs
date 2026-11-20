@@ -11,6 +11,8 @@ pub struct RawTree {
     pub nodes: Vec<RawNode>,
     /// How far down the system's status bar reaches, in points, when the agent or runner saw one.
     pub status_bar: Option<f32>,
+    /// Windows of apps outside the app scope that the daemon withheld; empty without a scope (decision D102).
+    pub outside: Vec<crate::scope::Outside>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -316,6 +318,7 @@ impl RawTree {
             windows,
             nodes,
             status_bar: wire.bar.map(|b| b / scale.density),
+            outside: Vec::new(),
         })
     }
 

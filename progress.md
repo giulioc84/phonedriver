@@ -3282,3 +3282,70 @@ ok log line: I/DisplayManager( 5578): Choreographer implicitly registered for th
 - The consent dialog: `am start` of the VPN app with `appops get ... ACTIVATE_VPN` at `default` gave `alert com.android.vpndialogs: "Connection request"` in `snapshot`, `tap Cancel` closed it; after `shell "appops set dev.pd016.vpnprobe ACTIVATE_VPN allow"` the same start connected the VPN with no dialog. Documented in `docs/reference.md` and `site/content/docs/android-emulator.md`.
 - Things seen and fixed on the way: with the pattern `pd-016-check` the wait returned on `adbd`'s own log of the command line (`adbd service requested 'shell,v2,raw:log -t pd016 pd-016-check'`), which is a true match; the reference says so. `dumpsys connectivity` answered in 6 to 10 s for about a minute after a VPN app was force-stopped, and the first version read an empty answer as "no network"; the read now allows 20 s and an empty or timed-out answer is an error. `Settings` runs as uid 1000, so `--app Settings` includes `system_server`'s lines.
 - Not done: the iOS Simulator log wait was not run through phonedriver. On my own Simulator (created, booted and deleted) the same `simctl spawn <runtime root>/usr/bin/log stream --style compact --level debug --predicate 'processImagePath CONTAINS "/MobileSafari.app/"'` that `shell_args` builds printed lines at once through a pipe, with a stderr warning (`getpwuid_r ...`, discarded) and two header lines (skipped until the first line that starts with a date). No physical Android phone or iPhone was touched. The earlier existing `crates/cli/tests/network.rs` (the no-outbound sandbox) was overwritten by mistake once and restored from git before anything was committed; the new daemon tests are in `netview.rs`.
+
+## 2026-11-20: a device list the daemon enforces (#26, D101)
+
+- `PHONEDRIVER_ALLOW_DEVICES`, `PHONEDRIVER_DENY_DEVICES` and the file `<home>/devices` (`allow <id>` / `deny <id>`, `#` comments). One wrapper around the daemon's device source (`Gated`, `crates/cli/src/daemon/policy.rs`) filters `list` and `list_for` and refuses `connect`, `connect_on` and `boot`, so every path resolves through it. A new `DeviceSource::hardware_serial` (Android: one read-only `getprop ro.serialno`, kept per connection) lets a serial entry name the same phone over USB and Wi-Fi; it is read only when a rule could name a serial and the id did not settle it. A new daemon method `hidden` says what is hidden; `phonedriver devices` ends with `N device(s) hidden by the device list`, the MCP reply does not; `doctor` does not show or probe a hidden device. Rules and limits are in D101 and `docs/reference.md` ("Devices an agent must not touch").
+- Tests first. `crates/cli/tests/device_list.rs` (14 tests, a fake source that records every `connect` and every serial read). With `permits` stubbed to `true`: `10 failed; 4 passed` (`left: ["android:emulator-5554", "android:emulator-5558"] right: ["android:emulator-5554"]`, `expected an error: Object {"exit": 0, ...}` for `shell --force` on a hidden device, and so on). With the check in: `13 passed` in that file at this commit, and the 136 library tests pass, among them the file parser and the entry matching. They cover: an allow list hides the others; a deny hides one; deny wins over allow; the environment's allow list and the file's both bind; a hardware-serial entry hides one phone under two adb ids (`android:ZZ1` and `android:192.168.1.20:5555`) and admits both; a device the id settles is never asked for its serial; `shell --force` on a hidden device is `-32001` and the fake saw no call; no `connect` ever reaches a hidden device; a hidden emulator is not booted; the file is read again when it changes; a typo in the file fails every call with the line number; devices that are not ready are judged by id for `doctor`.
+- Live, two emulators up (`emulator-5554` API 37 phone, `emulator-5558` API 37 tablet), `phonedriver` built on the mini, own `PHONEDRIVER_HOME`, both emulators' `phonedriver-agent-*.jar` and `phonedriver-owner` removed from `/data/local/tmp` before the run (`rm`, then `ls | grep -c phonedriver` gave 0 on the tablet):
+
+```
+$ PHONEDRIVER_DENY_DEVICES=android:emulator-5558 phonedriver devices
+ID                     MODEL                OS                   TIER   LEASE
+android:emulator-5554  sdk_gphone64_x86_64  Android 17 (API 37)  agent  -
+1 device hidden by the device list
+$ phonedriver snapshot --device android:emulator-5558
+error: no device "android:emulator-5558"; connected: android:emulator-5554 (sdk_gphone64_x86_64)
+hint: Pass `--device <id>` (or set PHONEDRIVER_DEVICE) to one of: android:emulator-5554.
+exit=4
+$ phonedriver --device android:emulator-5558 shell --force "ls /sdcard"
+error: no device "android:emulator-5558"; connected: android:emulator-5554 (sdk_gphone64_x86_64)
+exit=4
+$ adb -s emulator-5558 shell ls /data/local/tmp
+dalvik-cache
+mobilecli.dex
+mobilecli.so
+```
+
+  No `phonedriver-agent-*.jar` and no `phonedriver-owner` on the tablet after the daemon had listed it, been asked for it by id and been asked to `shell --force` on it. With the list in the file instead (`deny EMULATOR37X2X13X0`, the value `getprop ro.serialno` gives) both emulators were hidden (`no devices` and `2 devices hidden by the device list`): the two emulators report the same `ro.serialno`, so a serial entry cannot tell emulators apart and D101 says to name them by id. A typo (`deney x`) in the file made `devices` fail with `line 1 is `deney x`, not `allow <id>` or `deny <id>`` and exit 1; removing the file brought both back on the same daemon.
+- Found while testing live: my first version reused the one-per-phone helper, which takes any adb name without a colon as its own serial, so an emulator's `ro.serialno` was never read and the serial entry did nothing. The list now always reads the property (separate cache in `AdbSource`).
+- Not covered, and said in D101: `pair`, `untether`, `ios setup`, `ios wifi` and `ios register` (run by a person on a device they name, outside the daemon); a running daemon keeps the environment it started with.
+
+## 2026-11-20: `doctor` probes only devices nobody else owns (#27, D101)
+
+- Without `--device`, `phonedriver doctor` (and `init`, which runs it) checks the host and lists every device, and starts the agent or runner only on an emulator or Simulator that no live session holds. A physical phone or tablet (Android or iOS) and any device a live session holds get one line, `not probed: <why>`, with `fix: Run `phonedriver doctor --device <id>` to probe it.` `--all-devices` probes physical devices too, still skipping held ones; `--device <id>` probes that device only, held or not. The stderr line `starting the agent on ...` now names only the devices that are probed. "Held" is the new `lease_live` on each `devices` entry (an MCP session's lease, or a command line's within `TERMINAL_HOLD` of its last call), so a lease that has already yielded does not block a probe. If the daemon cannot be asked, nothing is probed without `--device` and a `daemon` line says why. Decision in D101, text in `docs/reference.md` (doctor), `docs/protocol.md`, `site/content/docs` (install, troubleshooting, android-emulator, android-phone).
+- Tests first (they did not compile before `Scope` and `Verdict` existed; the five new `doctor::tests` then passed): a physical phone, an address over Wi-Fi and an `ios:` device are listed and not probed (and the line carries the `--device` command); an emulator and a Simulator are probed; a held device is left alone, also with `--all-devices`, while `--device` still probes it; `--all-devices` probes the physical phone; `--device` probes exactly the named device; a hidden device is not shown; without the daemon nothing is probed. `crates/cli/tests/device_list.rs` gained `a_live_lease_is_marked_so_doctor_can_leave_the_device_alone` (a command-line session's lease from a snapshot shows `lease_live: true`).
+- Workspace on the Mac mini (`cargo test --workspace --no-fail-fast`): 1,076 passed, 0 failed, 137 ignored (the live and device tests). `cargo clippy --workspace --all-targets -- -D warnings`: clean. `cargo fmt --check`: clean.
+- Live, `emulator-5554` and `emulator-5558` up (the emulators were starved, `/proc/pressure/io` avg10 between 50 and 90 for the whole session while another build ran on win-pc, so several probes timed out in UiAutomation and are not shown; the lines below are the runs that completed), `PHONEDRIVER_DENY_DEVICES=android:emulator-5560` because a third emulator that is not mine was attached:
+
+```
+$ phonedriver doctor        (both emulators, nobody holds them)
+starting the agent on android:emulator-5554, android:emulator-5558; `--device <id>` checks only one
+ok    android:emulator-5554               connected
+ok    agent android:emulator-5554         answers hello: sdk_gphone64_x86_64 on Android API 37, 26.0 s with deploy
+ok    uiautomation android:emulator-5554  connected, the screen tree reads
+ok    android:emulator-5558               connected
+ok    agent android:emulator-5558         answers hello: sdk_gphone64_x86_64 on Android API 37, 1.0 s with deploy
+ok    device list                         1 device hidden by the device list and not probed
+$ phonedriver --session other snapshot --device android:emulator-5558 >/dev/null; phonedriver doctor
+starting the agent on android:emulator-5554; `--device <id>` checks only one
+ok    android:emulator-5558               connected
+warn  agent android:emulator-5558         not probed: session other holds it, and probing would take its agent
+      fix: Run `phonedriver doctor --device android:emulator-5558` to probe it.
+$ (same, then) phonedriver doctor --all-devices          -> the same warn line for 5558; starting the agent on android:emulator-5554 only
+$ (same, then) phonedriver doctor --device android:emulator-5558
+ok    agent android:emulator-5558         answers hello: sdk_gphone64_x86_64 on Android API 37, 1.0 s with deploy
+ok    uiautomation android:emulator-5558  connected, the screen tree reads
+```
+
+- A physical phone was not touched, so `not probed: a physical device` is shown by the fake-device tests only.
+- A mistake to own: my first `doctor` with no list probed a third emulator on the shared adb server (`emulator-5560`, not one of mine), which is exactly what the new default allows for emulators nobody holds. It answered `Android's accessibility service is not running on emulator-5560` (it was still booting) and I touched it no further; my agent jar may have been pushed to it. I then denied it by id for the rest of the session.
+
+## 2026-11-20: an app scope the daemon enforces (D102, #28)
+
+`PHONEDRIVER_APP_SCOPE=com.example.app,...` (daemon environment, never a tool argument) limits the daemon to those apps. `ScopedDevice` (`crates/cli/src/daemon/scope.rs`) wraps the connected device; `core::scope::AppScope::redact` takes other apps' windows, the bars and unlisted nodes out of every tree. Design, rejected options and the iOS rule are in D102; every known gap is in `docs/reference.md`, App scope.
+
+- Tests first: `crates/cli/tests/app_scope.rs` (21) and `core::scope` (8). With the wiring switched off the 21 gave 15 failures (the hello check and three in-scope cases passed); with it on, 21 pass. Two of my own mistakes showed up and were fixed: a `type` in another app said "no field has focus" before the scope's reason (the actor now checks first), and the empty-screen hint told the agent to screenshot or tap a screen it could not.
+- Mini, `cargo test --workspace --no-fail-fast`: 1082 passed, 0 failed, 137 ignored; `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --check` clean.
+- Live, Pixel_API_31 emulator (emulator-5560), scope `com.android.settings`, daemon with `PHONEDRIVER_TRACE_FULL=1`: `launch Settings` and `snapshot` show Settings; `launch Chrome` -> `error: no app named "Chrome" is in the app scope (com.android.settings)...`; `shell` refused naming `daemon stop`; `press home` -> `app com.google.android.apps.nexuslauncher (outside the app scope)`, then `tap`, `type`, `screenshot` refused with the package named; `launch Settings` from there works. `cmd notification post -t Hi tag 'secret-text'` on API 31 is importance 3, so it makes no heads-up; with `cmd statusbar expand-notifications` the shade (`com.android.systemui`) is on screen: `snapshot` -> `app com.android.systemui (outside the app scope)`, `screenshot`, `tap`, `type` refused, `press back` returns to Settings, `screenshot` then works (image looked at: Settings, status bar icons only). `grep -rl secret-text` over the PHONEDRIVER_HOME (traces included) found nothing. Control without a scope: `find secret-text` -> `@e14 button "Shell" "Hi · secret-text"`. A share chooser (`ResolverActivity`, package `android`) was withheld as `app android (outside the app scope)`.
+- Not done: no heads-up notification was produced (needs a high-importance channel), no live iOS run (fake-device tests only), the share sheet was tried only with the API 31 chooser. The coordinator's note about another agent's `doctor` probing 5560 during boot: my one early "agent did not print ready" error was in that window and was not counted; I removed `/data/local/tmp/phonedriver-owner` and re-ran the whole live script after it.

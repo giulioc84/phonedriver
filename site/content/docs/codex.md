@@ -3,7 +3,7 @@ title: How to use phonedriver with Codex
 seo: How to let Codex control an Android phone or iPhone
 nav: Codex
 description: Add phonedriver to OpenAI Codex as an MCP server with one command, a config.toml entry or a plugin, pick a device, and ask Codex to operate a phone.
-updated: 2026-11-14
+updated: 2026-11-20
 date: 2026-11-14
 ---
 
@@ -28,7 +28,9 @@ With more than one device connected, name the one to use. `phonedriver devices` 
 codex mcp add phonedriver --env PHONEDRIVER_DEVICE=android:emulator-5554 -- npx -y phonedriver mcp
 ```
 
-To let the agent clear, remove or change the permissions of an app you are developing on a physical Android phone (the apps Gradle installed, not phonedriver), add `--env PHONEDRIVER_APPS_UNDER_TEST=com.example.app` the same way, and run `phonedriver daemon stop` once if a daemon is running.
+To keep the agent in your own app on a phone with real accounts, add `--env PHONEDRIVER_APP_SCOPE=com.example.app` ([what it covers](/docs/android-phone/#keep-the-agent-in-your-app)). To let the agent clear, remove or change the permissions of an app you are developing on a physical Android phone (the apps Gradle installed, not phonedriver), add `--env PHONEDRIVER_APPS_UNDER_TEST=com.example.app` the same way, and run `phonedriver daemon stop` once if a daemon is running.
+
+To keep a phone out of the agent's reach on a shared adb server, add `--env PHONEDRIVER_DENY_DEVICES=android:<id>` the same way, or write `deny android:<id>` in `~/.phonedriver/devices`, which every agent on the machine obeys. A denied device is not listed, not probed by `doctor` and never gets the agent.
 
 ## Or edit config.toml
 

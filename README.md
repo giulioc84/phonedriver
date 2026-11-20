@@ -241,7 +241,7 @@ Tested on an iPhone 16e (iPhone17,5) on iOS 26.5 from Windows 11: setup, `snapsh
 
 - Tested on Android emulators (API 26 and 37), a HONOR X8 (Android 13), the iOS Simulator, an iPhone 13 Pro Max, an iPhone 14 Plus and an iPad Pro. Other Android phones use the same path. Bug reports from them are welcome.
 - A tap alone takes 29 to 39 ms on an Android emulator and 450 to 530 ms on a real iPhone. The 514 ms in the Speed chart is a tap, the wait until the screen stops changing, and the list of what changed.
-- The model can do anything on the phone you could do with your finger. For unattended runs, use an emulator or a spare phone.
+- The model can do anything on the phone you could do with your finger. For unattended runs, use an emulator or a spare phone. On a real test phone, `PHONEDRIVER_APP_SCOPE=com.example.app` keeps the agent's reads and taps to your app and refuses `shell`; it is not a sandbox, and [the docs](docs/reference.md#app-scope) list what it does not cover. On a shared adb server, `PHONEDRIVER_DENY_DEVICES` or a `~/.phonedriver/devices` file keeps phones that must never be driven out of reach: they are not listed, not probed by `doctor`, and never get the agent ([reference](docs/reference.md#devices-an-agent-must-not-touch)).
 - phonedriver never enters a passcode, and on a real phone it can't pass Face ID or a fingerprint check. On a locked phone a command stops and says the device is locked. phonedriver keeps a phone awake while an agent is using it. Screens that block screenshots, as some banking apps do, come out black in a screenshot, though their text can still be read.
 
 ## FAQ

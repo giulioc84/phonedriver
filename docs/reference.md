@@ -69,7 +69,7 @@ phonedriver 0.1.6
 
 Until the package is published, register the built binary with your client by its full path: `claude mcp add phonedriver -- "$PWD/target/release/phonedriver" mcp`.
 
-Run `phonedriver doctor`. It checks adb, each Android device, the agent, UiAutomation, the video stream, Xcode, the simulators, and the permissions of the daemon socket. Each line says `ok`, `warn` or `fail`, and a fix follows every line that is not `ok`. Without `--device` it starts the agent on every Android device the adb server lists, which replaces an agent another session is using, and names those devices on stderr first; with `--device <id>` it probes only that one.
+Run `phonedriver doctor`. It checks adb, each Android device, the agent, UiAutomation, the video stream, Xcode, the simulators, and the permissions of the daemon socket. Each line says `ok`, `warn` or `fail`, and a fix follows every line that is not `ok`. Without `--device` it checks the host and lists every device, and it probes (starts the agent or the runner on) only emulators and Simulators that no live session holds; a physical phone or tablet, and any device another live session holds, is listed with one `not probed` line that says why and gives `phonedriver doctor --device <id>`. `--all-devices` probes physical devices too, still skipping devices another live session holds. `--device <id>` probes that device and nothing else, even if a session holds it. Devices the [device list](#devices-an-agent-must-not-touch) hides are not shown. `phonedriver init` runs the default form.
 
 ```console
 $ phonedriver doctor
@@ -81,6 +81,8 @@ warn  simulators       none booted
       fix: `phonedriver boot` lists the ones that can be started; `phonedriver boot <name>` starts one.
 ok    daemon socket    /Users/you/.phonedriver/run/daemon.sock mode 600 in a directory of mode 700
 ```
+
+On a machine with a phone attached, the phone's line is `warn  agent android:R5CT123  not probed: a physical device, which doctor leaves alone unless asked`, followed by `fix: Run `phonedriver doctor --device android:R5CT123` to probe it.`
 
 The CLI runs the same loop. `phonedriver skill` prints [`SKILL.md`](../SKILL.md), the instructions an agent reads before it uses the tools.
 
@@ -158,7 +160,10 @@ Tested on an iPhone 13 Pro Max (iOS 27.0.1) on one network. An iPhone 14 Plus (i
 | `PHONEDRIVER_IOS_TIER` | `runner` | `coredevice` selects the CoreDevice tier on iOS 27 devices. Experimental. |
 | `PHONEDRIVER_GUARD` | on | `off` stops phonedriver asking the human before a tap that spends money or cannot be undone (`Place order`, `Pay`, `Delete account`). Set it for `phonedriver mcp` or the CLI only when you grant the agent full autonomy. |
 | `PHONEDRIVER_ASK` | none | A comma list of more kinds of tap to ask the human about, besides payments and account deletion: `send` (Send, Reply, Post, Share), `delete` (Delete, Remove, Erase, Clear all) and `install` (Install, Uninstall). For example `PHONEDRIVER_ASK=send,delete`. Read by `phonedriver mcp` and the CLI; a name that is not one of these stops the command with exit code 2. `PHONEDRIVER_GUARD=off` and `autonomous: true` skip these questions too. |
+| `PHONEDRIVER_ALLOW_DEVICES` | none | A comma list of devices the daemon may use, for example `android:emulator-5554,android:R5CT123`. Every other device behaves as if it were not connected. See [Devices an agent must not touch](#devices-an-agent-must-not-touch). The daemon reads it when it starts: run `phonedriver daemon stop` first if one is running. |
+| `PHONEDRIVER_DENY_DEVICES` | none | A comma list of devices the daemon never lists, connects to or pushes the agent to, even with `--force`. Same entries and same rules as the allow list; a device named here is hidden even when the allow list names it too. |
 | `PHONEDRIVER_APPS_UNDER_TEST` | none | A comma list of package names, such as `com.example.app,com.example.other`: apps of yours that Gradle or Android Studio installed, not phonedriver. On a physical Android phone `apps clear`, `uninstall`, `grant`, `revoke` and `launch --grant` touch only apps phonedriver installed; the packages listed here count as installed by you. The daemon reads it when it starts, so set it in the environment of the command that starts it (for an MCP client, the server's `env`; see [Claude Code](/docs/claude-code/#an-app-you-are-developing)) and run `phonedriver daemon stop` first if a daemon is running. It is the person's setting and there is no tool argument for it, so an agent cannot add an app to the list. |
+| `PHONEDRIVER_APP_SCOPE` | none | A comma list of package names, such as `com.example.app`: the only apps the agent may read or act in (see [App scope](#app-scope)). Not the same as `PHONEDRIVER_APPS_UNDER_TEST`, which says which apps phonedriver may clear or uninstall on a physical phone and restricts nothing else. The daemon reads it when it starts; a client that sets a scope the running daemon was not started with is refused until `phonedriver daemon stop`. There is no tool argument for it, so an agent cannot set or clear it. |
 | `PHONEDRIVER_SECRET` | none | The text for `type --secret`, instead of stdin. The daemon shows it as `•••` wherever it later appears on a screen it reads or in a command's output, until the daemon stops; a screenshot still shows what the phone shows. |
 | `PHONEDRIVER_TRACE_FULL` | off | `1` keeps observation text and the text of text targets in the traced requests (the daemon reads it at start). Replies are traced as returned either way: a summary or an error can name an element, as in `tapped @e6 "Busy"` or `no element matches "Pay"`. |
 | `PHONEDRIVER_TRACE_SCREENS` | off | `1` copies every screenshot next to its trace file. |
@@ -167,6 +172,54 @@ Tested on an iPhone 13 Pro Max (iOS 27.0.1) on one network. An iPhone 14 Plus (i
 | `PHONEDRIVER_TEST_DEVICE`, `PHONEDRIVER_TEST_IOS_UDID`, `PHONEDRIVER_BENCH`, `PHONEDRIVER_BIN` | none | Tests and benchmarks only. |
 
 The runner's own `PHONEDRIVER_PORT`, `PHONEDRIVER_BUILD` and `PHONEDRIVER_UDID` are set by phonedriver for the iOS runner and are not for you.
+
+### Devices an agent must not touch
+
+On a shared adb server (a rack of test phones, a staff phone left charging) the fence is a device list the daemon enforces. A device the list does not allow, or denies, behaves as if it were not connected: `devices` does not list it, `doctor` does not probe it, every call that names it (`--device`, `PHONEDRIVER_DEVICE`, `devices {use}`, a replay or the GitHub Action) gets the same "no device" error as for a typo, `--force` does not change that, and the agent is never pushed to it.
+
+Entries are the ids `phonedriver devices` shows (`android:emulator-5554`, `android:192.168.1.20:5555`, `ios:<udid>`, `sim:<udid>`), with or without the prefix, or an Android phone's hardware serial (`ro.serialno`, the number in `adb devices` over USB), so one rule hits the same phone over USB and over Wi-Fi. (Emulators from one system image share a serial: name an emulator by its id.) The serial is read from the phone only when an entry could name it and the id did not already settle the question: one read-only `getprop`, and nothing is pushed.
+
+Three places set the list, and they combine as follows: a device is hidden when any deny entry from any place names it, and, for each place that has an allow list, when that list does not name it. So a machine-wide file's allow list cannot be widened by an MCP client's `env`.
+
+- `PHONEDRIVER_ALLOW_DEVICES` and `PHONEDRIVER_DENY_DEVICES` in the environment that starts the daemon (for an MCP client, the server's `env`).
+- The file `devices` in the phonedriver home (`~/.phonedriver/devices`, or under `PHONEDRIVER_HOME`), for a setting that holds for every agent on the machine. It is read again whenever it changes, so adding a `deny` line takes effect on the next call.
+
+```
+# the lab rack
+allow android:emulator-5554
+allow android:R5CT123
+deny  android:0123456789ABCDEF   # Maria's phone
+```
+
+A line that is not `allow <id>` or `deny <id>` makes every device unavailable and the error names the file and the line: a list that cannot be read must not leave a phone open. `phonedriver devices` on a terminal ends with `1 device hidden by the device list`; the MCP `devices` reply says nothing about hidden devices.
+
+The list covers what goes through the daemon. `pair`, `untether` and `ios setup`, `ios wifi` and `ios register` are commands a person runs on a device by name, and they talk to the device without it. The list is the person's setting, as with `PHONEDRIVER_APPS_UNDER_TEST` (D100): an agent with a shell on the computer can start its own daemon without it.
+
+## App scope
+
+`PHONEDRIVER_APP_SCOPE=com.example.app,com.example.other` limits the daemon to those apps, so a phone that is signed in to real accounts can be handed to an agent that tests one app (decision D102). The daemon enforces it under every verb; it is the person's setting in the environment the daemon starts with (for an MCP client, the server's `env`), and no tool argument sets or clears it. It differs from `PHONEDRIVER_APPS_UNDER_TEST`: that variable lets phonedriver clear or uninstall apps Gradle installed, and restricts nothing the agent can read or tap. Use both for an app under test on a real phone.
+
+**In scope without being listed:** the system's permission, installer, VPN consent and crash dialogs that phonedriver already recognises as alerts, the keyboard window, and the status and navigation bars (never read, so no notification text).
+
+**Reads.** `snapshot`, `find`, `wait`, `page`, OCR, `compare` and the replies of actions show nothing from a window of an app outside the scope. The header says `app <package> (outside the app scope)` and lists no elements. The home screen is such an app: it lists apps and may carry widgets, so its content is never shown, while `press home` still works. `screenshot` is refused while any window of another app is on screen (a notification shade, a share sheet, a split-screen app, a picture-in-picture window): the picture cannot be cut by window, so it is refused, not blanked. The check runs before and after the capture. Traces, saved steps and `replay --screens` come from these replies and screenshots, so they hold nothing else.
+
+**Actions.** `tap`, `type`, `clear`, `swipe`, `scroll`, `gesture`, `drag`, `pinch`, `press` keys, `clipboard set`, batch steps and `then` paths are refused while a window of an app outside the scope is on screen. `press back`, `press home`, `press lock` and `launch` of an app in the scope are allowed, so the agent can get back. `press recents` and `press notifications` are refused. `launch` and `open` of an app outside the scope are refused. `open <url>` needs `--app <package>` with a package in the scope, because a link can open any app. `clipboard get` is refused, since the clipboard may hold what was copied in another app.
+
+**Apps, logs, network, settings.** `apps` lists only apps in the scope, and `stop`, `clear`, `uninstall`, `grant`, `revoke` and `notify` on any other app are refused as if it did not exist. `logs` and `wait log` read only an app in the scope; `wait log` without `--app` uses the scope's only package and is refused when the scope names several. `network` is allowed (it shows device state, not app content), with the owner of a VPN outside the scope shown as "an app outside the app scope". `setting` is allowed: it reads and writes typed system settings, not app content. `apps install` is allowed; it adds or updates an app, and the app cannot be used unless it is in the scope.
+
+**Refused whole.** `shell` is refused: `am start`, `input` and `content query` go around every rule above. `record` and `snapshot --capture` are refused: a video and the raw tree hold every window.
+
+**iPhone and iPad.** The runner reports the front app and SpringBoard alerts only, so phonedriver cannot see a notification banner or another app's window over the front app. Reads and actions use the front app's bundle id the same way. `screenshot`, and therefore OCR, `compare` of the screen and `replay --screens`, are refused under a scope. A device whose front app is unknown (the CoreDevice tier has no tree) counts as outside the scope.
+
+**Known gaps.** The scope narrows what phonedriver reads and does; it is not a sandbox, and these are open:
+
+- The package of an app outside the scope that is in front is named in the header and in refusals. The status bar's notification icons are in a screenshot, so it shows which apps have notifications.
+- The keyboard is in scope: its suggestion strip can show text from the clipboard or a password manager, and a screenshot takes it.
+- A window that appears after the check and before the input or the capture is not caught for input; a screenshot is checked again after the capture.
+- Windows are told apart by the package that owns them. A system dialog is let through when phonedriver recognises it; the share sheet is withheld by its package or resource ids (`android:id/resolver_list`, `com.android.intentresolver`), so a maker's variant with other ids would be let through as a dialog. A window thinner than 5 percent of the screen on one side is taken for an edge strip.
+- An app in the scope can hand off to another (a link, a share). The handoff itself runs; what follows is hidden and refused until `press back` or `press home`.
+- `logs` of an app in the scope are the app's own and can hold anything it logs. `setting` and `network` are device-wide.
+- An agent with another way to the phone (its own adb, another MCP server) is not stopped.
 
 ## Debugging
 

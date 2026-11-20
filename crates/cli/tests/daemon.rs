@@ -5148,6 +5148,8 @@ fn daemon_under_test(source: Arc<FakeSource>, apps: &[&str]) -> (Arc<Daemon>, te
         },
         phonedriver::daemon::trace::TraceOptions::default(),
         apps.iter().map(|a| a.to_string()).collect(),
+        phonedriver::daemon::policy::Policy::default(),
+        None,
     );
     (d, home)
 }
