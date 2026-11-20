@@ -132,3 +132,36 @@ Change: `Frame::turned_cw()` marks the quarter turn instead of doing it (115 ms 
 Release build (`CARGO_INCREMENTAL=0 cargo build --release -p phonedriver`), own daemon with `PHONEDRIVER_IOS_TIER=coredevice`, host load average 3 to 15: 135 s of alternating taps on B3 and B7, one per second plus the settle wait: 95 taps, 0 missed changes (`changed` true for each), tap-to-settled-diff p50 430 ms p95 524 ms; the testbed's event log holds exactly 95 `tap` events in that window, alternating b3, b7. No backlog was seen.
 
 Not met, found on the way: (1) the stream is not turned by device orientation. With the testbed in landscape the screenshot comes out sideways (1032x1368, content rotated), and taps must be given in that frame's coordinates (B3 at 661,1188), not the app's. The tier assumes the portrait case measured earlier. (2) The tier has no accessibility tree: `snapshot` is OCR text without refs, so tap-by-text and refs do not work. Because of both, CoreDevice stays opt-in.
+
+## W1: Wi-Fi off a Mac through remote pairing (2026-11-20)
+
+**Question.** D47 reaches a phone on Wi-Fi with Xcode's pairing. Off a Mac there is no Xcode, and over Wi-Fi every lockdown service closes after TLS (D47), so the runner cannot start there and setup cannot read the app list or the image state. Does idevice's `remote_pairing` (the pairing Xcode uses for "Connect via network") open the same services from Windows?
+
+**Setup.** iPhone17,5 (iPhone 16e), iOS 26.5, Developer Mode on, the developer disk image mounted, PhonedriverRunner installed with Sideloadly. Windows 11, Apple Devices' usbmuxd, home Wi-Fi. idevice 0.1.68 with one added function (below). Spike code was `spikes/wifi-pairing/` (`pair`, `browse`, `tunnel`, `launch`), deleted at the end of the phase.
+
+**Pairing, once, on the cable.** The spike started `com.apple.dt.remotepairingdeviced.lockdown` over lockdown (75 ms) and ran pair-setup through it with `RemotePairingClient`. The phone answered without `awaitingUserConsent`, so idevice asked for a code, and the phone showed none. The fixed code `000000`, the one idevice uses when the phone asks for consent, was accepted. Nothing appeared on the phone at any point. The record (`.rppairing`) was written. `EnableWifiConnections` was set the same way as `phonedriver ios wifi on`. This is unlike D47's rejected-option note, which expected a second approval on the device.
+
+**Discovery.** Right after the pairing the phone announced `_remotepairing._tcp` at 192.168.1.164, port 49152, `ver=24`, `flags=0`, next to the `_apple-mobdev2._tcp` announcement D47 uses. The `authTag` on `_apple-mobdev2` matched this PC's cable pair record. Before the pairing, `_remotepairing._tcp` was not announced.
+
+**Over Wi-Fi.** These are ranges over three runs: `tunnel 192.168.1.164 49152` once, then `launch` twice. All three went to the phone's Wi-Fi address. The cable was out for the last run (usbmuxd listed no device); for the first two it may still have been in.
+
+| Step | ms |
+|---|---|
+| pair-verify with the record | 33 to 88 |
+| `createListener` | 80 to 217 |
+| TLS-PSK tunnel (MTU 16000) | 42 to 259 |
+| RSD handshake through the tunnel (83 services, among them `com.apple.dt.testmanagerd.remote`, `com.apple.instruments.dtservicehub` and the `*.shim.remote` lockdown services) | 52 to 65 |
+| amfi shim, Developer Mode status (`true`), `tunnel` only | 248 + 111 |
+| image mounter shim, mounted images (1), `tunnel` only | 289 + 137 |
+| installation proxy shim, user apps (101, runner found by executable) | 146 to 247 + 522 to 836 |
+
+**Starting the runner off the cable.** idevice's `XCUITestService::run` builds its tunnel only through lockdown's `CoreDeviceProxy`, which closes over Wi-Fi. The spike added `XCUITestService::run_over_rsd(handle, handshake, ios_major, cfg, listener, timeout)` to a copy of idevice 0.1.68: the same steps as `run`, with the three DTX connections opened through the caller's tunnel and the iOS version passed in, not read from lockdown. `launch 192.168.1.164 49152 <udid>`, two runs:
+
+- The runner answered `hello` through the tunnel 7.3 s after the command started (first run; the cable may still have been in) and 2.7 s after (second run, usbmuxd listing no device): `{"ios":"26.5","model":"iPhone17,5","screen":{"w":390,"h":844,"scale":3},"udid":"<udid>","version":"0.1.0","build":"wifi-spike",…}`.
+- It also answered straight at `192.168.1.164:27753` over Wi-Fi without the tunnel, as in D47.
+- Five more `hello` round trips through the tunnel: 99 and 107 ms each.
+- The runner's log shows the normal start (`Notifying test runner ready`, `_IDE_startExecutingTestPlanWithProtocolVersion:36`, test bundle loaded).
+
+**Result.** From Windows, after one pairing on the cable with nothing to approve on the phone, everything setup and the daemon need is reachable over Wi-Fi: Developer Mode state, image state (and so the image mounter), the app list, and the runner's start through testmanagerd. Built as decision D103 the same day, with `run_over_rsd` added to idevice (Coreho's commit `3bd5d45`, built from `hridaya423/idevice`).
+
+**Not measured.** Whether the record survives a phone restart or an iOS update; what happens when the phone sleeps (D47 saw both announcements withdrawn when the screen went off); a tap or snapshot through the daemon over this path; other phones or iOS versions; how long the record stays valid.

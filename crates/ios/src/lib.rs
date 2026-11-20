@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod lan;
 pub mod map;
 pub mod offer;
+pub mod remote;
 pub mod runner;
 pub mod setup;
 pub mod simio;

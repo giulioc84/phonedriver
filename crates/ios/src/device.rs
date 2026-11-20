@@ -23,7 +23,6 @@ use tokio::sync::{Notify, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use idevice::IdeviceService;
 use idevice::provider::IdeviceProvider;
 use idevice::services::installation_proxy::InstallationProxyClient;
 
@@ -34,7 +33,7 @@ use crate::simulator::{
     PHYSICAL_PUSH, Simulator, check_push_payload, log_stream_command, privacy_service, shell_args,
     simctl, simctl_follow, simctl_shell, simctl_with_input,
 };
-use crate::transport::Link;
+use crate::transport::{Link, Services, Tunnel};
 
 /// Luma pixels per point for settle polls: one sample per 4x4 points, as architecture 4.6 measures change.
 const POLL_SCALE: f32 = 0.25;
@@ -71,6 +70,8 @@ enum Host {
     /// Over the network the device closes every lockdown service after the TLS handshake (observed 2026-11-12,
     /// iOS 27.0.1: amfi, the image mounter, the installation proxy), so only the runner's own port is used.
     Network,
+    /// Off a Mac over Wi-Fi: the tunnel of the remote pairing reaches the services lockdown closes (decision D103).
+    Tunnel(Tunnel),
 }
 
 pub struct IosDevice {
@@ -228,28 +229,21 @@ impl IosDevice {
         IosDevice::with_runner(host, id, &device.udid, model, runner, None, None)
     }
 
-    /// A device on the cable whose runner the person installed, started without Xcode (architecture 7.3). Over
-    /// Wi-Fi the device closes the lockdown services that find and start the runner, so this needs the cable.
+    /// A device whose runner the person installed, started without Xcode (architecture 7.3): on the cable, or over
+    /// Wi-Fi through the remote pairing `phonedriver ios wifi on` made (decision D103).
     pub async fn connect_installed(
         device: &crate::transport::Attached,
         model: &str,
         home: &Path,
     ) -> Result<IosDevice> {
         let id = format!("ios:{}", device.udid);
-        let provider = device
-            .provider()
-            .await
-            .map_err(|e| crate::transport::classify(&id, &e))?;
-        let runner = Runner::start_installed(provider.clone(), &device.udid, home).await?;
-        IosDevice::with_runner(
-            Host::Cable(provider),
-            id,
-            &device.udid,
-            model,
-            runner,
-            None,
-            None,
-        )
+        let mut services = Services::open(device, home).await?;
+        let runner = Runner::start_installed(device, &mut services, home).await?;
+        let host = match services {
+            Services::Lockdown(provider) => Host::Cable(provider),
+            Services::Tunnel(tunnel) => Host::Tunnel(tunnel),
+        };
+        IosDevice::with_runner(host, id, &device.udid, model, runner, None, None)
     }
 
     fn with_runner(
@@ -337,7 +331,7 @@ impl IosDevice {
     fn simulator_only(&self) -> Result<()> {
         match self.host {
             Host::Simulator => Ok(()),
-            Host::Cable(_) | Host::Network => Err(Error::Unsupported {
+            Host::Cable(_) | Host::Network | Host::Tunnel(_) => Err(Error::Unsupported {
                 op: Op::App,
                 reason: "installing, stopping or removing apps on a physical iPhone is not implemented",
             }),
@@ -540,13 +534,12 @@ fn luma_frame(reply: &Value) -> Option<Frame> {
     ))
 }
 
-async fn installed_apps(provider: &dyn IdeviceProvider, id: &str) -> Result<Vec<App>> {
+async fn installed_apps(services: &mut Services, id: &str) -> Result<Vec<App>> {
     let gone = |e| crate::transport::classify(&id.to_string(), &e);
-    let socket =
-        crate::transport::lockdown_service(provider, InstallationProxyClient::service_name())
-            .await
-            .map_err(gone)?;
-    let mut client = InstallationProxyClient::new(socket);
+    let mut client = services
+        .client::<InstallationProxyClient>()
+        .await
+        .map_err(gone)?;
     let found = client.get_apps(None, None).await.map_err(gone)?;
     let mut apps: Vec<App> = found
         .iter()
@@ -878,7 +871,12 @@ impl Device for IosDevice {
     async fn apps(&self) -> Result<Vec<App>> {
         match &self.host {
             Host::Cable(provider) => {
-                return Box::pin(installed_apps(provider.as_ref(), &self.info.id)).await;
+                let mut services = Services::Lockdown(provider.clone());
+                return Box::pin(installed_apps(&mut services, &self.info.id)).await;
+            }
+            Host::Tunnel(tunnel) => {
+                let mut services = Services::Tunnel(tunnel.clone());
+                return Box::pin(installed_apps(&mut services, &self.info.id)).await;
             }
             Host::Network => {
                 let json =
@@ -900,7 +898,7 @@ impl Device for IosDevice {
                 Host::Simulator => {
                     simctl(&["launch", &self.udid, &app.0]).await?;
                 }
-                Host::Cable(_) | Host::Network => {
+                Host::Cable(_) | Host::Network | Host::Tunnel(_) => {
                     self.client()
                         .request(Op::Launch, json!({"op": "activate", "bundle_id": app.0}))
                         .await?;

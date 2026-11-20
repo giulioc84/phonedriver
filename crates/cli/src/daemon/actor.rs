@@ -159,8 +159,6 @@ pub enum Call {
     Release,
     /// `Release`, and the session's state on this device is dropped: its last screen, journal and approvals.
     Forget,
-    /// Who holds the lease, without taking it.
-    Leased,
 }
 
 /// Where an action's time went, in call order: `(phase, ms)`. In microseconds; written into the trace line as milliseconds.
@@ -176,6 +174,22 @@ pub struct Job {
     pub reply: oneshot::Sender<(Result<Value, Error>, Phases)>,
 }
 
+/// Who holds the device, read without waiting for the call the actor is in. Seen 2026-11-20 on an iPhone on
+/// Wi-Fi: a reconnect never returned, and `devices`, which asked the actor itself, waited behind it.
+#[derive(Clone, Default)]
+pub struct Held {
+    pub session: Option<String>,
+    pub last_call: Option<Instant>,
+    pub terminal: bool,
+    pub hidden_display: Option<u32>,
+}
+
+#[derive(Clone)]
+pub struct Handle {
+    pub jobs: mpsc::Sender<Job>,
+    pub held: watch::Receiver<Held>,
+}
+
 pub fn spawn(
     id: String,
     source: Arc<dyn DeviceSource>,
@@ -183,10 +197,12 @@ pub fn spawn(
     secrets: Arc<Secrets>,
     ledger: Arc<Ledger>,
     scope: Option<Arc<AppScope>>,
-) -> mpsc::Sender<Job> {
+) -> Handle {
     let (tx, rx) = mpsc::channel(32);
+    let (held, seen) = watch::channel(Held::default());
     let actor = Actor {
         id,
+        held,
         source,
         home,
         lease: None,
@@ -210,7 +226,10 @@ pub fn spawn(
         scope,
     };
     tokio::spawn(actor.run(rx));
-    tx
+    Handle {
+        jobs: tx,
+        held: seen,
+    }
 }
 
 /// A recording in progress: its file, when it began, and how many actions are in its steps file.
@@ -323,6 +342,7 @@ const GUARD_VIEW_REUSE: Duration = Duration::from_secs(1);
 
 struct Actor {
     id: String,
+    held: watch::Sender<Held>,
     source: Arc<dyn DeviceSource>,
     home: PathBuf,
     lease: Option<Lease>,
@@ -426,7 +446,17 @@ impl Actor {
                     self.absorb(sig, at);
                 }
             }
+            self.publish();
         }
+    }
+
+    fn publish(&self) {
+        self.held.send_replace(Held {
+            session: self.lease.as_ref().map(|l| l.session.clone()),
+            last_call: self.lease.as_ref().map(|l| l.last_call),
+            terminal: self.lease.as_ref().is_some_and(|l| l.terminal),
+            hidden_display: self.live.as_ref().and_then(|l| l.device.hidden_display()),
+        });
     }
 
     fn shown(&self) -> Option<RawTree> {
@@ -597,15 +627,6 @@ impl Actor {
         display: DisplayMode,
         call: Call,
     ) -> Result<Value, Error> {
-        if matches!(call, Call::Leased) {
-            let hidden_display = self.live.as_ref().and_then(|l| l.device.hidden_display());
-            return Ok(match &self.lease {
-                Some(l) => {
-                    json!({"session": l.session, "idle_s": l.last_call.elapsed().as_secs(), "live": !l.terminal || l.last_call.elapsed() < TERMINAL_HOLD, "hidden_display": hidden_display})
-                }
-                None => json!({"hidden_display": hidden_display}),
-            });
-        }
         if matches!(call, Call::Release | Call::Forget) {
             if self.lease.as_ref().is_some_and(|l| l.session == session) {
                 self.drop_lease();
@@ -616,6 +637,7 @@ impl Actor {
             return Ok(json!({}));
         }
         self.acquire(&session, terminal, share)?;
+        self.publish();
         let t = Instant::now();
         let live = self.ensure_live(display).await;
         self.lap("connect", t);
@@ -779,7 +801,7 @@ impl Actor {
             Call::Page(p) => self.page(p).await?,
             Call::Record(p) => self.record(p).await?,
             Call::Health => self.health().await?,
-            Call::Release | Call::Forget | Call::Leased => json!({}),
+            Call::Release | Call::Forget => json!({}),
         };
         Ok(value)
     }

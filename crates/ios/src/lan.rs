@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use mdns_sd::{ResolvedService, ScopedIp, ServiceDaemon, ServiceEvent};
 use phonedriver_core::error::Error;
 
+use crate::remote;
 use crate::transport::{self, Attached, Link};
 
 const SERVICE: &str = "_apple-mobdev2._tcp.local.";
@@ -101,12 +102,30 @@ fn advert(service: &ResolvedService) -> Option<Advert> {
     })
 }
 
-/// What the cable pairing left on this computer that tells its device apart on the network.
+/// A `_remotepairing._tcp` announcement: the device's service for computers that paired with it that way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pairing {
+    identifier: String,
+    tag: String,
+    port: u16,
+}
+
+fn pairing(service: &ResolvedService) -> Option<Pairing> {
+    Some(Pairing {
+        identifier: service.get_property_val_str("identifier")?.to_string(),
+        tag: service.get_property_val_str("authTag")?.to_string(),
+        port: service.port,
+    })
+}
+
+/// What the cable pairing left on this computer that tells its device apart on the network: usbmuxd's pair record
+/// and, off a Mac, the key in the remote pairing record (decision D103).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Known {
     udid: String,
     host_id: String,
     mac: String,
+    key: Option<Vec<u8>>,
 }
 
 fn is_from(advert: &Advert, known: &Known) -> bool {
@@ -127,54 +146,105 @@ fn address(advert: &Advert) -> Option<(IpAddr, Option<u32>)> {
         .copied()
 }
 
-fn find(adverts: &[Advert], known: &Known) -> Option<Attached> {
+fn find(adverts: &[Advert], pairings: &[Pairing], known: &Known) -> Option<Attached> {
     let (addr, scope) = adverts
         .iter()
         .filter(|a| is_from(a, known))
         .find_map(address)?;
+    let pairing = known.key.as_ref().and_then(|key| {
+        pairings
+            .iter()
+            .find(|p| remote::announced_by(key, &p.identifier, &p.tag))
+            .map(|p| p.port)
+    });
     Some(Attached {
         udid: known.udid.clone(),
-        link: Link::Network { addr, scope },
+        link: Link::Network {
+            addr,
+            scope,
+            pairing,
+        },
+    })
+}
+
+/// Whether every known device was found, a remotely paired one with the port of its remote pairing service.
+fn complete(found: &[Attached], known: &[Known]) -> bool {
+    known.iter().all(|k| {
+        found.iter().any(|a| {
+            a.udid == k.udid
+                && (k.key.is_none()
+                    || matches!(
+                        a.link,
+                        Link::Network {
+                            pairing: Some(_),
+                            ..
+                        }
+                    ))
+        })
     })
 }
 
 /// A running browse for the devices in `udids`. Dropping it stops the browse.
 pub struct Lan {
+    home: PathBuf,
     udids: Vec<String>,
     started: Instant,
     seen: Arc<Mutex<HashMap<String, Advert>>>,
+    pairings: Arc<Mutex<HashMap<String, Pairing>>>,
     daemon: ServiceDaemon,
 }
 
+fn follow<T: Send + 'static>(
+    events: mdns_sd::Receiver<ServiceEvent>,
+    into: Arc<Mutex<HashMap<String, T>>>,
+    read: fn(&ResolvedService) -> Option<T>,
+) {
+    std::thread::spawn(move || {
+        while let Ok(event) = events.recv() {
+            let Ok(mut seen) = into.lock() else { return };
+            match event {
+                ServiceEvent::ServiceResolved(service) => {
+                    if let Some(found) = read(&service) {
+                        seen.insert(service.fullname.clone(), found);
+                    }
+                }
+                ServiceEvent::ServiceRemoved(_, fullname) => {
+                    seen.remove(&fullname);
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 impl Lan {
-    pub fn watch(udids: Vec<String>) -> Result<Lan, Error> {
+    /// Off a Mac it also browses for remote pairing services, which the devices `phonedriver ios wifi on` paired
+    /// with announce (decision D103).
+    pub fn watch(home: &Path, udids: Vec<String>) -> Result<Lan, Error> {
         let failed = |e: mdns_sd::Error| Error::Transport {
             detail: format!("cannot browse the local network for iOS devices: {e}"),
         };
         let daemon = ServiceDaemon::new().map_err(failed)?;
-        let events = daemon.browse(SERVICE).map_err(failed)?;
         let seen: Arc<Mutex<HashMap<String, Advert>>> = Arc::default();
-        let into = seen.clone();
-        std::thread::spawn(move || {
-            while let Ok(event) = events.recv() {
-                let Ok(mut seen) = into.lock() else { return };
-                match event {
-                    ServiceEvent::ServiceResolved(service) => {
-                        if let Some(advert) = advert(&service) {
-                            seen.insert(service.fullname.clone(), advert);
-                        }
-                    }
-                    ServiceEvent::ServiceRemoved(_, fullname) => {
-                        seen.remove(&fullname);
-                    }
-                    _ => {}
-                }
-            }
-        });
+        follow(
+            daemon.browse(SERVICE).map_err(failed)?,
+            seen.clone(),
+            advert,
+        );
+        let pairings: Arc<Mutex<HashMap<String, Pairing>>> = Arc::default();
+        if !crate::setup::XCODE {
+            follow(
+                daemon.browse(remote::SERVICE).map_err(failed)?,
+                pairings.clone(),
+                pairing,
+            );
+        }
         Ok(Lan {
+            home: home.to_path_buf(),
             udids,
             started: Instant::now(),
             seen,
+            pairings,
             daemon,
         })
     }
@@ -189,7 +259,15 @@ impl Lan {
             .lock()
             .map(|s| s.values().cloned().collect())
             .unwrap_or_default();
-        known.iter().filter_map(|k| find(&adverts, k)).collect()
+        let pairings: Vec<Pairing> = self
+            .pairings
+            .lock()
+            .map(|s| s.values().cloned().collect())
+            .unwrap_or_default();
+        known
+            .iter()
+            .filter_map(|k| find(&adverts, &pairings, k))
+            .collect()
     }
 
     /// The remembered devices that answer on the network now. A browse younger than 2 s waits for its first
@@ -202,12 +280,13 @@ impl Lan {
                     udid: udid.clone(),
                     host_id: pairing.host_id,
                     mac: pairing.wifi_mac_address,
+                    key: remote::key(&self.home, udid),
                 });
             }
         }
         loop {
             let found = self.now(&known);
-            if found.len() == known.len() || self.started.elapsed() >= FIRST_ANSWERS {
+            if complete(&found, &known) || self.started.elapsed() >= FIRST_ANSWERS {
                 return found;
             }
             tokio::time::sleep(POLL).await;
@@ -251,7 +330,72 @@ mod tests {
             udid: "UDID".into(),
             host_id: host_id.into(),
             mac: mac.into(),
+            key: None,
         }
+    }
+
+    const KEY: [u8; 16] = [7; 16];
+
+    fn pairing_for(key: &[u8; 16], identifier: &str, port: u16) -> Pairing {
+        Pairing {
+            identifier: identifier.into(),
+            tag: STANDARD.encode(idevice::remote_pairing::compute_auth_tag(key, identifier)),
+            port,
+        }
+    }
+
+    #[test]
+    fn a_device_paired_off_a_mac_gets_the_port_of_its_own_remote_pairing_announcement() {
+        let adverts = [advert_for(HOST, "ID", &[("192.168.0.136", None)])];
+        let pairings = [
+            pairing_for(&[8; 16], "RP-1", 1000),
+            pairing_for(&KEY, "RP-2", 49152),
+        ];
+        let paired = Known {
+            key: Some(KEY.to_vec()),
+            ..known(HOST, "")
+        };
+        assert_eq!(
+            find(&adverts, &pairings, &paired).map(|a| a.link),
+            Some(Link::Network {
+                addr: "192.168.0.136".parse().unwrap(),
+                scope: None,
+                pairing: Some(49152),
+            })
+        );
+        assert_eq!(
+            find(&adverts, &pairings[..1], &paired).map(|a| a.link),
+            Some(Link::Network {
+                addr: "192.168.0.136".parse().unwrap(),
+                scope: None,
+                pairing: None,
+            })
+        );
+        let unpaired = known(HOST, "");
+        assert!(matches!(
+            find(&adverts, &pairings, &unpaired).map(|a| a.link),
+            Some(Link::Network { pairing: None, .. })
+        ));
+    }
+
+    #[test]
+    fn a_paired_device_is_complete_only_with_its_remote_pairing_port() {
+        let at = |pairing| Attached {
+            udid: "UDID".into(),
+            link: Link::Network {
+                addr: "192.168.0.136".parse().unwrap(),
+                scope: None,
+                pairing,
+            },
+        };
+        let paired = Known {
+            key: Some(KEY.to_vec()),
+            ..known(HOST, "")
+        };
+        assert!(!complete(&[at(None)], std::slice::from_ref(&paired)));
+        assert!(complete(&[at(Some(49152))], std::slice::from_ref(&paired)));
+        assert!(complete(&[at(None)], &[known(HOST, "")]));
+        assert!(!complete(&[], &[known(HOST, "")]));
     }
 
     #[test]
@@ -259,11 +403,11 @@ mod tests {
         let mut old = advert_for(HOST, "", &[("192.168.0.50", None)]);
         old.tags.clear();
         old.mac = "A6:F0:1F:00:00:01".into();
-        assert!(find(&[old.clone()], &known("x", "a6:f0:1f:00:00:01")).is_some());
-        assert!(find(&[old.clone()], &known("x", "a6:f0:1f:00:00:02")).is_none());
-        assert!(find(&[old], &known("x", "")).is_none());
+        assert!(find(&[old.clone()], &[], &known("x", "a6:f0:1f:00:00:01")).is_some());
+        assert!(find(&[old.clone()], &[], &known("x", "a6:f0:1f:00:00:02")).is_none());
+        assert!(find(&[old], &[], &known("x", "")).is_none());
         let tagged = advert_for("someone-else", "ID", &[("192.168.0.9", None)]);
-        assert!(find(&[tagged], &known(HOST, "aa:bb:cc:dd:ee:ff")).is_none());
+        assert!(find(&[tagged], &[], &known(HOST, "aa:bb:cc:dd:ee:ff")).is_none());
     }
 
     #[test]
@@ -273,16 +417,17 @@ mod tests {
             advert_for(HOST, "ID-2", &[("192.168.0.136", None)]),
         ];
         assert_eq!(
-            find(&adverts, &known(HOST, "")),
+            find(&adverts, &[], &known(HOST, "")),
             Some(Attached {
                 udid: "UDID".into(),
                 link: Link::Network {
                     addr: "192.168.0.136".parse().unwrap(),
-                    scope: None
+                    scope: None,
+                    pairing: None,
                 },
             })
         );
-        assert_eq!(find(&adverts[..1], &known(HOST, "")), None);
+        assert_eq!(find(&adverts[..1], &[], &known(HOST, "")), None);
     }
 
     #[test]

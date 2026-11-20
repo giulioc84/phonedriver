@@ -273,7 +273,7 @@ impl PhysicalSource {
         ) {
             browse.lan = match remembered.is_empty() {
                 true => None,
-                false => Some(Lan::watch(remembered)?),
+                false => Some(Lan::watch(&self.home, remembered)?),
             };
         }
         browse.cabled = udids;

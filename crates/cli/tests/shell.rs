@@ -297,3 +297,22 @@ async fn a_device_whose_actor_panicked_answers_again_on_the_next_call() {
     ok(&d, "shell", command("echo hi")).await;
     assert_eq!(ran(&fake), ["echo hi"]);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_device_whose_actor_panicked_is_listed_without_the_lease_its_call_took() {
+    let fake = Arc::new(polled(vec![tree(&["One"])]));
+    let home = tempfile::tempdir().unwrap();
+    let d = Daemon::new(
+        Arc::new(PanicsOnce {
+            fake: fake.clone(),
+            connects: Default::default(),
+        }),
+        Config {
+            home: home.path().to_path_buf(),
+        },
+    );
+    err(&d, command("echo hi")).await;
+    let listed = ok(&d, "devices", json!({})).await;
+    assert_eq!(listed[0]["id"], "fake:1", "{listed}");
+    assert!(listed[0]["leased_by"].is_null(), "{listed}");
+}

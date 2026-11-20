@@ -47,6 +47,7 @@ fn field_tree(value: &str, password: bool) -> RawTree {
 struct FakeSource {
     devices: Mutex<Vec<(Listed, Arc<FakeDevice>)>>,
     off: Mutex<Vec<DeviceSummary>>,
+    never_connects: std::sync::atomic::AtomicBool,
 }
 
 impl FakeSource {
@@ -72,6 +73,7 @@ impl FakeSource {
                 fake.clone(),
             )]),
             off: Mutex::new(vec![]),
+            never_connects: Default::default(),
         });
         (source, fake)
     }
@@ -90,6 +92,12 @@ impl DeviceSource for FakeSource {
     }
 
     async fn connect(&self, id: &str) -> Result<Arc<dyn Device>, Error> {
+        if self
+            .never_connects
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            std::future::pending::<()>().await;
+        }
         self.devices
             .lock()
             .unwrap()
@@ -435,6 +443,28 @@ async fn the_mcp_client_registers_the_session_its_calls_carry() {
     drop(client);
     d.shutdown();
     serving.await.unwrap().unwrap();
+}
+
+/// Seen 2026-11-20 on an iPhone on Wi-Fi: after the phone dropped off, a call's reconnect never returned, and
+/// `devices` waited behind it for every client.
+#[tokio::test]
+async fn devices_answers_while_a_call_waits_on_a_device_that_never_connects() {
+    let (source, _) = FakeSource::with(vec![tree(&["One"])]);
+    source
+        .never_connects
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (d, _home) = daemon(source);
+    let stuck = tokio::spawn({
+        let d = d.clone();
+        async move { d.call("x", "snapshot", json!({})).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let listed = tokio::time::timeout(Duration::from_secs(2), ok(&d, "y", "devices", json!({})))
+        .await
+        .expect("devices waited for the call that never connects");
+    assert_eq!(listed[0]["leased_by"], "x");
+    assert_eq!(listed[0]["lease_idle_s"], 0);
+    stuck.abort();
 }
 
 #[tokio::test]
@@ -5097,6 +5127,7 @@ fn physical() -> (Arc<FakeSource>, Arc<FakeDevice>) {
             fake.clone(),
         )]),
         off: Mutex::new(vec![]),
+        never_connects: Default::default(),
     });
     (source, fake)
 }

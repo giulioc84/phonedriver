@@ -236,6 +236,7 @@ pub enum UserAction {
     ChooseSigningTeam { teams: Vec<String> },
     RegisterDevice,
     InstallRunner,
+    PairForWifi,
     ApproveSystemPrompt { text: String },
 }
 
@@ -276,6 +277,10 @@ impl UserAction {
                 "The PhonedriverRunner app is not installed on the device. Without Xcode, phonedriver cannot build and sign it, so it starts the copy you install."
                     .into()
             }
+            UserAction::PairForWifi => {
+                "This computer has no Wi-Fi pairing with the device. Without Xcode, phonedriver reaches a device on Wi-Fi through a pairing it makes once over the cable."
+                    .into()
+            }
             UserAction::ApproveSystemPrompt { text } => {
                 format!("The device shows a prompt only a person may answer: \"{text}\".")
             }
@@ -308,6 +313,9 @@ impl UserAction {
             }
             UserAction::InstallRunner => {
                 "Run `phonedriver ios setup`: it says where PhonedriverRunner.ipa is. Install that on the device with Sideloadly, signed with your Apple ID, turn on Developer Mode if the device asks, then retry."
+            }
+            UserAction::PairForWifi => {
+                "Connect the device with the cable, unlock it and run `phonedriver ios wifi on`. Then unplug it and retry."
             }
             UserAction::ApproveSystemPrompt { .. } => {
                 "Answer the prompt on the device, then retry."
@@ -801,10 +809,19 @@ mod tests {
             },
             UserAction::RegisterDevice,
             UserAction::InstallRunner,
+            UserAction::PairForWifi,
             UserAction::ApproveSystemPrompt {
                 text: "Use Face ID?".into(),
             },
         ]
+    }
+
+    #[test]
+    fn pairing_for_wifi_says_the_cable_is_needed_once() {
+        let hint = UserAction::PairForWifi.hint();
+        assert!(hint.contains("`phonedriver ios wifi on`"), "{hint}");
+        assert!(hint.contains("cable"), "{hint}");
+        assert!(UserAction::PairForWifi.message().contains("Wi-Fi"));
     }
 
     fn all_errors() -> Vec<Error> {

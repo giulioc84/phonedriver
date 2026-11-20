@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use idevice::ReadWrite;
-use idevice::RsdService;
 use idevice::core_device::{
     AppServiceClient, ButtonState, CallInfoBlob, DisplayServiceClient, IndigoHidClient,
     MainKeyboardService, PasteboardServiceClient, ReportBlock, RtpPacket,
@@ -77,22 +76,6 @@ pub struct CoreDevice {
     _display: DisplayServiceClient<Socket>,
 }
 
-/// `RsdHandshake::connect`, spelled out so the socket type is `'static`: through `connect_rsd` the daemon's
-/// `Send` check fails with "implementation of `RsdService` is not general enough".
-async fn rsd_client<C: RsdService>(
-    adapter: &mut idevice::tcp::handle::AdapterHandle,
-    rsd: &idevice::rsd::RsdHandshake,
-) -> std::result::Result<C, idevice::IdeviceError> {
-    let port = rsd
-        .services
-        .get(&C::rsd_service_name().to_string())
-        .ok_or(idevice::IdeviceError::ServiceNotFound)?
-        .port;
-    let stream = adapter.connect(port).await?;
-    let socket: Socket = Box::new(stream);
-    C::from_stream(socket).await
-}
-
 fn call_info() -> CallInfoBlob {
     CallInfoBlob {
         call_id: 0,
@@ -147,7 +130,7 @@ impl CoreDevice {
         let mut tunnel = Tunnel::open(device).await.map_err(lost)?;
         let Tunnel { adapter, rsd } = &mut tunnel;
 
-        let mut display = rsd_client::<DisplayServiceClient<Socket>>(adapter, rsd)
+        let mut display = transport::rsd_client::<DisplayServiceClient<Socket>>(adapter, rsd)
             .await
             .map_err(lost)?;
         let audio = adapter
@@ -201,16 +184,16 @@ impl CoreDevice {
             .and_then(|p| u16::try_from(p).ok())
             .ok_or_else(|| stream_error("answer", "no SourcePort"))?;
 
-        let hid = rsd_client::<UniversalHidServiceClient<Socket>>(adapter, rsd)
+        let hid = transport::rsd_client::<UniversalHidServiceClient<Socket>>(adapter, rsd)
             .await
             .map_err(lost)?;
-        let indigo = rsd_client::<IndigoHidClient<Socket>>(adapter, rsd)
+        let indigo = transport::rsd_client::<IndigoHidClient<Socket>>(adapter, rsd)
             .await
             .map_err(lost)?;
-        let pasteboard = rsd_client::<PasteboardServiceClient<Socket>>(adapter, rsd)
+        let pasteboard = transport::rsd_client::<PasteboardServiceClient<Socket>>(adapter, rsd)
             .await
             .map_err(lost)?;
-        let apps = rsd_client::<AppServiceClient<Socket>>(adapter, rsd)
+        let apps = transport::rsd_client::<AppServiceClient<Socket>>(adapter, rsd)
             .await
             .map_err(lost)?;
 

@@ -141,7 +141,7 @@ pub(crate) fn names(id: &str, requested: &str) -> bool {
 pub struct Daemon {
     source: Arc<policy::Gated>,
     home: PathBuf,
-    actors: Mutex<HashMap<String, mpsc::Sender<Job>>>,
+    actors: Mutex<HashMap<String, actor::Handle>>,
     traces: Traces,
     told: Mutex<HashMap<String, String>>,
     secrets: Arc<secrets::Secrets>,
@@ -502,11 +502,11 @@ impl Daemon {
             )
         };
         let mut actors = self.actors.lock().unwrap_or_else(|e| e.into_inner());
-        let tx = actors.entry(id.to_string()).or_insert_with(spawn);
-        if tx.is_closed() {
-            *tx = spawn();
+        let handle = actors.entry(id.to_string()).or_insert_with(spawn);
+        if handle.jobs.is_closed() {
+            *handle = spawn();
         }
-        tx.clone()
+        handle.jobs.clone()
     }
 
     async fn send(
@@ -595,19 +595,16 @@ impl Daemon {
                 ids.insert(0, l.id.clone());
             }
             for id in ids {
-                let existing = self
+                let held = self
                     .actors
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .contains_key(&id);
-                let lease = if existing {
-                    self.send(&id, "", false, DisplayMode::Main, Call::Leased)
-                        .await?
-                } else {
-                    Value::Null
-                };
-                let hidden_display = lease["hidden_display"].as_u64().map(|d| d as u32);
-                if id != l.id && lease["session"].is_null() && hidden_display.is_none() {
+                    .get(&id)
+                    .filter(|a| !a.jobs.is_closed())
+                    .map(|a| a.held.borrow().clone())
+                    .unwrap_or_default();
+                let hidden_display = held.hidden_display;
+                if id != l.id && held.session.is_none() && hidden_display.is_none() {
                     continue;
                 }
                 out.push(DeviceEntry {
@@ -616,9 +613,13 @@ impl Daemon {
                     os: l.os.clone().unwrap_or_default(),
                     tier: l.tier.clone(),
                     capabilities: l.capabilities,
-                    leased_by: lease["session"].as_str().map(str::to_string),
-                    lease_idle_s: lease["idle_s"].as_u64(),
-                    lease_live: lease["live"].as_bool().unwrap_or(false),
+                    lease_live: held.session.is_some()
+                        && (!held.terminal
+                            || held
+                                .last_call
+                                .is_some_and(|t| t.elapsed() < actor::TERMINAL_HOLD)),
+                    leased_by: held.session,
+                    lease_idle_s: held.last_call.map(|t| t.elapsed().as_secs()),
                     hidden_display,
                 });
             }

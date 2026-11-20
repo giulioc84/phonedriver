@@ -2,8 +2,11 @@
 //! `core::Error` and the single reconnect (architecture 7.1).
 
 use idevice::core_device_proxy::CoreDeviceProxy;
-use std::net::IpAddr;
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use idevice::pairing_file::PairingFile;
 use idevice::provider::{IdeviceProvider, TcpProvider, UsbmuxdProvider};
@@ -11,12 +14,12 @@ use idevice::rsd::RsdHandshake;
 use idevice::services::lockdown::LockdownClient;
 use idevice::tcp::handle::AdapterHandle;
 use idevice::usbmuxd::{Connection, UsbmuxdAddr, UsbmuxdDevice};
-use idevice::{IdeviceError, IdeviceService};
+use idevice::{IdeviceError, IdeviceService, ReadWrite, RsdService};
 use phonedriver_core::error::{DeviceId, Error, UserAction};
 
 use crate::lan::Lan;
 
-const LABEL: &str = "phonedriver";
+pub(crate) const LABEL: &str = "phonedriver";
 
 /// How this computer reaches a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +32,9 @@ pub enum Link {
     Network {
         addr: IpAddr,
         scope: Option<u32>,
+        /// Off a Mac, the port of the device's remote pairing service when this computer keeps a remote pairing for
+        /// it and the device announces the service (decision D103).
+        pairing: Option<u16>,
     },
 }
 
@@ -48,7 +54,7 @@ impl Attached {
                 device_id: mux_id,
                 label: LABEL.to_string(),
             }),
-            Link::Network { addr, scope } => Arc::new(TcpProvider {
+            Link::Network { addr, scope, .. } => Arc::new(TcpProvider {
                 addr,
                 scope_id: scope,
                 pairing_file: pair_record(&self.udid).await?,
@@ -193,6 +199,7 @@ pub async fn lockdown_service(
 }
 
 /// The CoreDevice tunnel over the userspace TCP stack, with its RSD service list.
+#[derive(Clone)]
 pub struct Tunnel {
     pub adapter: AdapterHandle,
     pub rsd: RsdHandshake,
@@ -214,6 +221,114 @@ impl Tunnel {
         let mut names: Vec<String> = self.rsd.services.keys().cloned().collect();
         names.sort();
         names
+    }
+}
+
+/// `RsdHandshake::connect`, spelled out so the socket type is `'static`: through `connect_rsd` the daemon's
+/// `Send` check fails with "implementation of `RsdService` is not general enough".
+pub async fn rsd_client<C: RsdService>(
+    adapter: &mut AdapterHandle,
+    rsd: &RsdHandshake,
+) -> Result<C, IdeviceError> {
+    let port = rsd
+        .services
+        .get(&C::rsd_service_name().to_string())
+        .ok_or(IdeviceError::ServiceNotFound)?
+        .port;
+    let stream = adapter.connect(port).await?;
+    let socket: Box<dyn ReadWrite> = Box::new(stream);
+    C::from_stream(socket).await
+}
+
+/// Where the developer services of `device` answer, given whether this computer keeps a remote pairing for it and
+/// whether Xcode is here: `None` for lockdown, or the address of the device's remote pairing service.
+fn tunnel_to(
+    device: &Attached,
+    has_record: bool,
+    xcode: bool,
+) -> Result<Option<SocketAddr>, Error> {
+    let Link::Network {
+        addr,
+        scope,
+        pairing,
+    } = device.link
+    else {
+        return Ok(None);
+    };
+    match (xcode, has_record, pairing) {
+        (true, _, _) => Ok(None),
+        (false, false, _) => Err(Error::NeedsUser {
+            action: UserAction::PairForWifi,
+        }),
+        (false, true, None) => Err(Error::Transport {
+            detail: format!(
+                "ios:{} answers on Wi-Fi but does not announce its remote pairing service; unlock it and keep it on the same network",
+                device.udid
+            ),
+        }),
+        (false, true, Some(port)) => Ok(Some(crate::remote::socket_addr(addr, scope, port))),
+    }
+}
+
+/// How long a device on Wi-Fi off a Mac gets to open its tunnel, and `setup::status` to read through it. Seen
+/// 2026-11-20 on an iPhone on Wi-Fi that had just dropped off: the daemon's reconnect opened a tunnel, the device
+/// never answered in it, and the call waited until the daemon was stopped. `doctor`'s three reads over Wi-Fi took
+/// 3.8 s in all.
+pub(crate) const ANSWER_WITHIN: Duration = Duration::from_secs(15);
+
+pub(crate) async fn answered_within<T>(
+    limit: Duration,
+    udid: &str,
+    read: impl Future<Output = Result<T, Error>>,
+) -> Result<T, Error> {
+    tokio::time::timeout(limit, read).await.unwrap_or_else(|_| {
+        Err(Error::Transport {
+            detail: format!(
+                "ios:{udid} did not answer within {} s; unlock it and keep it on the same network, or plug it in",
+                limit.as_secs()
+            ),
+        })
+    })
+}
+
+/// Where a device's developer services answer: lockdown on the cable, or off a Mac over Wi-Fi the tunnel of the
+/// remote pairing, because there the device closes lockdown's services after the TLS handshake (decision D103).
+pub enum Services {
+    Lockdown(Arc<dyn IdeviceProvider>),
+    Tunnel(Tunnel),
+}
+
+impl Services {
+    pub async fn open(device: &Attached, home: &Path) -> Result<Services, Error> {
+        let id = format!("ios:{}", device.udid);
+        let lost = |e| classify(&id, &e);
+        let mut record = crate::remote::read(home, &device.udid);
+        match tunnel_to(device, record.is_some(), crate::setup::XCODE)? {
+            Some(addr) => match record.as_mut() {
+                // In a debug build this future is 169 KB. Held inline by `setup::status` and the rest, it overflowed
+                // the 1 MB main thread stack of `doctor` on Windows (CI, 2026-11-20).
+                Some(record) => Ok(Services::Tunnel(
+                    Box::pin(crate::remote::open(&device.udid, addr, record)).await?,
+                )),
+                None => Err(Error::NeedsUser {
+                    action: UserAction::PairForWifi,
+                }),
+            },
+            None => Ok(Services::Lockdown(device.provider().await.map_err(lost)?)),
+        }
+    }
+
+    /// Starts a lockdown service; through the tunnel, its RSD shim.
+    pub async fn client<C: IdeviceService + RsdService>(&mut self) -> Result<C, IdeviceError> {
+        match self {
+            Services::Lockdown(provider) => {
+                let socket =
+                    lockdown_service(provider.as_ref(), <C as IdeviceService>::service_name())
+                        .await?;
+                <C as IdeviceService>::from_stream(socket).await
+            }
+            Services::Tunnel(tunnel) => rsd_client::<C>(&mut tunnel.adapter, &tunnel.rsd).await,
+        }
     }
 }
 
@@ -294,12 +409,54 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_device_that_stops_answering_fails_the_read_instead_of_waiting_for_good() {
+        let e = answered_within(
+            std::time::Duration::from_millis(20),
+            "A",
+            std::future::pending::<Result<(), Error>>(),
+        )
+        .await
+        .unwrap_err();
+        let Error::Transport { detail } = &e else {
+            panic!("{e:?}")
+        };
+        assert!(detail.starts_with("ios:A did not answer"), "{detail}");
+        assert!(detail.contains("unlock it"), "{detail}");
+    }
+
+    #[test]
+    fn off_a_mac_a_device_on_wifi_is_reached_through_its_remote_pairing_and_without_one_asks_for_the_cable()
+     {
+        let paired = |pairing| Attached {
+            udid: "A".into(),
+            link: Link::Network {
+                addr: "192.168.1.20".parse().unwrap(),
+                scope: None,
+                pairing,
+            },
+        };
+        assert_eq!(
+            tunnel_to(&paired(Some(49152)), true, false),
+            Ok(Some("192.168.1.20:49152".parse().unwrap()))
+        );
+        assert_eq!(
+            tunnel_to(&paired(None), false, false),
+            Err(needs(UserAction::PairForWifi))
+        );
+        let silent = tunnel_to(&paired(None), true, false).unwrap_err();
+        assert!(silent.to_string().contains("remote pairing"), "{silent}");
+        assert_eq!(tunnel_to(&paired(Some(49152)), true, true), Ok(None));
+        assert_eq!(tunnel_to(&on_cable("A", 3), true, false), Ok(None));
+    }
+
     fn on_wifi(udid: &str) -> Attached {
         Attached {
             udid: udid.to_string(),
             link: Link::Network {
                 addr: "192.168.1.20".parse().unwrap(),
                 scope: None,
+                pairing: None,
             },
         }
     }

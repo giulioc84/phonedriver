@@ -66,7 +66,7 @@ pub async fn describe(device: &Attached) -> Result<Found, Error> {
     })
 }
 
-fn major(os_version: &str) -> Result<u32, Error> {
+pub(crate) fn major(os_version: &str) -> Result<u32, Error> {
     os_version
         .split('.')
         .next()

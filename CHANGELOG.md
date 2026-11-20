@@ -7,6 +7,8 @@ Every release of phonedriver, newest first. Binaries and checksums for each vers
 Released 20 November 2026.
 
 - **An iPhone from Windows**: with Apple Devices installed, phonedriver drives an iPhone or iPad on iOS 17 to 26 over the cable with no Mac. You sign and install the runner from this release (`PhonedriverRunner.ipa`) with Sideloadly, and `phonedriver ios setup --download-ddi` mounts the developer disk image itself. Contributed by Coreho (#23).
+- **An iPhone on Wi-Fi from Windows**: `phonedriver ios wifi on` once on the cable, then unplug and keep driving the phone over Wi-Fi, as Xcode's "Connect via network" does. Nothing shows on the phone. `ios wifi off` forgets the pairing. Contributed by Coreho (#29).
+- **`devices` answers while a phone is stuck connecting**: it no longer waits behind a call to a device that does not answer (seen for over 3 minutes with an iPhone that dropped off Wi-Fi) (#29).
 - **Logins in CI**: a saved run replays a `--secret` step from an environment variable (`PHONEDRIVER_SECRET_1`, `_2`, ...), so a run that signs in replays unattended in the GitHub Action with `env: PHONEDRIVER_SECRET_1: ${{ secrets.APP_PASSWORD }}`. The secret is masked like any other.
 - **Variables in saved runs**: `{{name}}` in a step is filled by `replay --var name=value` (the Action's `vars` input), and `{{run}}` is a short id new for each replay, for fresh data such as `test+{{run}}@example.com`.
 - **`phonedriver network`** shows an Android device's networks, which one is the default, a VPN's owning app and the users it covers, DNS per network, and the always-on VPN and lockdown settings.

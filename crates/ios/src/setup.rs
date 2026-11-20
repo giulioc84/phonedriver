@@ -1,11 +1,12 @@
 //! What a physical device needs before phonedriver can drive it, and `phonedriver ios setup` (architecture 7.1, 7.4).
 
-use idevice::IdeviceService;
+use std::path::Path;
+
 use idevice::services::amfi::AmfiClient;
 use idevice::services::mobile_image_mounter::ImageMounter;
 use phonedriver_core::error::{Error, UserAction};
 
-use crate::transport::{self, Attached, Link, lockdown_service};
+use crate::transport::{self, Attached, Link, Services};
 
 /// On a Mac, Xcode mounts the developer disk image and builds, signs and starts the runner on a physical device.
 /// Elsewhere phonedriver mounts the image itself and starts a runner the person installed (architecture 7.3).
@@ -17,36 +18,39 @@ pub struct Status {
     pub image_mounted: bool,
 }
 
-/// Reads the state; a device that does not trust this Mac fails with `NeedsUser(TrustComputer)`.
-pub async fn status(device: &Attached) -> Result<Status, Error> {
+/// Reads the state; a device that does not trust this computer fails with `NeedsUser(TrustComputer)`. `home` holds
+/// the remote pairing a device on Wi-Fi is reached through off a Mac.
+pub async fn status(device: &Attached, home: &Path) -> Result<Status, Error> {
     let id = format!("ios:{}", device.udid);
-    if matches!(device.link, Link::Network { .. }) {
+    if XCODE && matches!(device.link, Link::Network { .. }) {
         return Ok(status_of(
             &devicectl(&["info", "details"], &device.udid).await?,
         ));
     }
     let lost = |e| transport::classify(&id, &e);
-    let provider = device.provider().await.map_err(lost)?;
-    let provider = provider.as_ref();
-    let socket = lockdown_service(provider, AmfiClient::service_name())
-        .await
-        .map_err(lost)?;
-    let developer_mode = AmfiClient::new(socket)
-        .get_developer_mode_status()
-        .await
-        .map_err(lost)?;
-    let socket = lockdown_service(provider, ImageMounter::service_name())
-        .await
-        .map_err(lost)?;
-    let image_mounted = !ImageMounter::new(socket)
-        .copy_devices()
-        .await
-        .map_err(lost)?
-        .is_empty();
-    Ok(Status {
-        developer_mode,
-        image_mounted,
-    })
+    let read = async {
+        let mut services = Services::open(device, home).await?;
+        let developer_mode = services
+            .client::<AmfiClient>()
+            .await
+            .map_err(lost)?
+            .get_developer_mode_status()
+            .await
+            .map_err(lost)?;
+        let image_mounted = !services
+            .client::<ImageMounter>()
+            .await
+            .map_err(lost)?
+            .copy_devices()
+            .await
+            .map_err(lost)?
+            .is_empty();
+        Ok(Status {
+            developer_mode,
+            image_mounted,
+        })
+    };
+    transport::answered_within(transport::ANSWER_WITHIN, &device.udid, read).await
 }
 
 fn status_of(details: &serde_json::Value) -> Status {
@@ -87,14 +91,14 @@ pub async fn devicectl(args: &[&str], udid: &str) -> Result<serde_json::Value, E
 }
 
 /// Shows the Developer Mode switch in Settings; the person turns it on and restarts the device.
-pub async fn reveal_developer_mode(device: &Attached) -> Result<(), Error> {
+pub async fn reveal_developer_mode(device: &Attached, home: &Path) -> Result<(), Error> {
     let id = format!("ios:{}", device.udid);
     let lost = |e| transport::classify(&id, &e);
-    let provider = device.provider().await.map_err(lost)?;
-    let socket = lockdown_service(provider.as_ref(), AmfiClient::service_name())
+    Services::open(device, home)
+        .await?
+        .client::<AmfiClient>()
         .await
-        .map_err(lost)?;
-    AmfiClient::new(socket)
+        .map_err(lost)?
         .reveal_developer_mode_option_in_ui()
         .await
         .map_err(lost)
@@ -131,23 +135,45 @@ pub async fn mount_image(udid: &str) -> Result<(), Error> {
 }
 
 /// Mounts the personalized image from `files` without Xcode. idevice asks Apple's signing server for this device's
-/// ticket, the one request to Apple (decision D9), then uploads and mounts the image.
-pub async fn mount_files(device: &Attached, files: &crate::ddi::Files) -> Result<(), Error> {
+/// ticket, the one request to Apple (decision D9), then uploads and mounts the image. Over Wi-Fi the image mounter is
+/// reached through the remote pairing's tunnel; lockdown itself still answers there and gives the chip ID.
+pub async fn mount_files(
+    device: &Attached,
+    home: &Path,
+    files: &crate::ddi::Files,
+) -> Result<(), Error> {
     let id = format!("ios:{}", device.udid);
     let lost = |e| transport::classify(&id, &e);
     let image = files.read(crate::ddi::IMAGE)?;
     let trust_cache = files.read(crate::ddi::TRUST_CACHE)?;
     let manifest = files.read(crate::ddi::MANIFEST)?;
     let provider = device.provider().await.map_err(lost)?;
-    let provider = provider.as_ref();
-    let chip = transport::unique_chip_id(provider).await.map_err(lost)?;
-    let socket = lockdown_service(provider, ImageMounter::service_name())
+    let chip = transport::unique_chip_id(provider.as_ref())
         .await
         .map_err(lost)?;
-    ImageMounter::new(socket)
-        .mount_personalized(provider, image, trust_cache, &manifest, None, chip)
-        .await
-        .map_err(lost)
+    let mut services = Services::open(device, home).await?;
+    let mut mounter = services.client::<ImageMounter>().await.map_err(lost)?;
+    match &mut services {
+        Services::Lockdown(provider) => {
+            mounter
+                .mount_personalized(provider.as_ref(), image, trust_cache, &manifest, None, chip)
+                .await
+        }
+        Services::Tunnel(tunnel) => {
+            mounter
+                .mount_personalized_rsd(
+                    &mut tunnel.adapter,
+                    &mut tunnel.rsd,
+                    image,
+                    trust_cache,
+                    &manifest,
+                    None,
+                    chip,
+                )
+                .await
+        }
+    }
+    .map_err(lost)
 }
 
 /// What the person must do before the image can mount. iOS refuses a personalized image while Developer Mode is off
@@ -158,8 +184,8 @@ pub fn mount_blocked(status: &Status) -> Option<UserAction> {
 
 /// On a computer without Xcode, mounts the image from the files `phonedriver ios setup` downloaded when it is not
 /// mounted: a restart of the device unmounts it.
-pub async fn mount_cached(device: &Attached, home: &std::path::Path) -> Result<(), Error> {
-    let status = status(device).await?;
+pub async fn mount_cached(device: &Attached, home: &Path) -> Result<(), Error> {
+    let status = status(device, home).await?;
     if status.image_mounted {
         return Ok(());
     }
@@ -167,7 +193,7 @@ pub async fn mount_cached(device: &Attached, home: &std::path::Path) -> Result<(
         return Err(Error::NeedsUser { action });
     }
     match crate::ddi::cached(home) {
-        Some(files) => mount_files(device, &files).await,
+        Some(files) => mount_files(device, home, &files).await,
         None => Err(Error::NeedsUser {
             action: UserAction::MountDeveloperImage,
         }),

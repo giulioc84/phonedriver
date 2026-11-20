@@ -780,14 +780,11 @@ pub fn installed_runner<'a>(
 
 /// The runner's bundle id on the device, if the person installed it.
 pub async fn find_installed(
-    provider: &dyn idevice::provider::IdeviceProvider,
+    services: &mut crate::transport::Services,
 ) -> std::result::Result<Option<String>, idevice::IdeviceError> {
-    let socket = crate::transport::lockdown_service(
-        provider,
-        <idevice::services::installation_proxy::InstallationProxyClient as idevice::IdeviceService>::service_name(),
-    )
-    .await?;
-    let apps = idevice::services::installation_proxy::InstallationProxyClient::new(socket)
+    let apps = services
+        .client::<idevice::services::installation_proxy::InstallationProxyClient>()
+        .await?
         .get_apps(Some("User"), None)
         .await?;
     Ok(installed_runner(&apps))
@@ -818,24 +815,27 @@ impl idevice::services::dvt::xctest::listener::XCUITestListener for RunnerLog {
 impl Runner {
     /// Starts the runner the person installed (signed with their own Apple ID by a tool such as Sideloadly) through
     /// testmanagerd with idevice's XCTest client, so no Xcode is needed; or reuses one that answers `hello` with
-    /// this udid and build. The developer disk image must be mounted.
+    /// this udid and build. The developer disk image must be mounted. Over Wi-Fi, testmanagerd is reached through the
+    /// remote pairing's tunnel in `services` and the runner at its port on the device's address.
     pub async fn start_installed(
-        provider: std::sync::Arc<dyn idevice::provider::IdeviceProvider>,
-        udid: &str,
+        device: &crate::transport::Attached,
+        services: &mut crate::transport::Services,
         home: &Path,
     ) -> Result<Runner> {
         use idevice::services::dvt::xctest::{TestConfig, XCUITestService};
         use idevice::services::installation_proxy::InstallationProxyClient;
-        let device = format!("ios:{udid}");
+        let udid = device.udid.as_str();
+        let id = format!("ios:{udid}");
         let hash = build_hash();
-        let gone = |e: idevice::IdeviceError| crate::transport::classify(&device, &e);
+        let gone = |e: idevice::IdeviceError| crate::transport::classify(&id, &e);
+        let provider = device.provider().await.map_err(gone)?;
         let connect = || async {
             let socket = provider
                 .connect(DEVICE_PORT)
                 .await
                 .ok()
                 .and_then(idevice::Idevice::get_socket)?;
-            let client = Client::over(socket, &device);
+            let client = Client::over(socket, &id);
             let hello = timeout(HELLO_WAIT, client.hello()).await.ok()?.ok()?;
             Some((client, hello))
         };
@@ -852,19 +852,16 @@ impl Runner {
                 _claim: None,
             });
         }
-        let bundle = find_installed(provider.as_ref())
+        let bundle = find_installed(services)
             .await
             .map_err(gone)?
             .ok_or(Error::NeedsUser {
                 action: UserAction::InstallRunner,
             })?;
-        let socket = crate::transport::lockdown_service(
-            provider.as_ref(),
-            <InstallationProxyClient as idevice::IdeviceService>::service_name(),
-        )
-        .await
-        .map_err(gone)?;
-        let mut proxy = InstallationProxyClient::new(socket);
+        let mut proxy = services
+            .client::<InstallationProxyClient>()
+            .await
+            .map_err(gone)?;
         let mut config = TestConfig::from_installation_proxy(&mut proxy, &bundle, None)
             .await
             .map_err(gone)?;
@@ -880,10 +877,28 @@ impl Runner {
         };
         std::fs::create_dir_all(&dir).map_err(io)?;
         let mut listener = RunnerLog(std::fs::File::create(&log).map_err(io)?);
-        let service = XCUITestService::new(provider.clone());
-        let mut session = XctestSession(tokio::spawn(async move {
-            service.run(config, &mut listener, None).await
-        }));
+        let mut session = XctestSession(match services {
+            crate::transport::Services::Lockdown(provider) => {
+                let service = XCUITestService::new(provider.clone());
+                tokio::spawn(async move { service.run(config, &mut listener, None).await })
+            }
+            crate::transport::Services::Tunnel(tunnel) => {
+                let os = crate::transport::identity(device).await.map_err(gone)?.os;
+                let major = crate::discovery::major(&os)? as u8;
+                let tunnel = tunnel.clone();
+                tokio::spawn(async move {
+                    XCUITestService::run_over_rsd(
+                        tunnel.adapter,
+                        &tunnel.rsd,
+                        major,
+                        config,
+                        &mut listener,
+                        None,
+                    )
+                    .await
+                })
+            }
+        });
         let deadline = Instant::now() + READY_WAIT;
         loop {
             if let Some((client, hello)) = connect().await

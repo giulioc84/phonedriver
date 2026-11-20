@@ -10,7 +10,7 @@ pub(crate) async fn attached(home: &Path) -> Result<Vec<Attached>, String> {
     let udids = lan::remembered(home);
     let browse = match udids.is_empty() {
         true => None,
-        false => Some(Lan::watch(udids).map_err(|e| e.to_string())?),
+        false => Some(Lan::watch(home, udids).map_err(|e| e.to_string())?),
     };
     transport::attached(browse.as_ref())
         .await
@@ -54,11 +54,27 @@ fn done(device: &Attached, on: bool) -> String {
     }
 }
 
+/// Off a Mac, turning Wi-Fi on over the cable also makes the remote pairing that reaches the device's services
+/// over Wi-Fi (decision D103). On a Mac, Xcode's own pairing does that.
+fn pairs(on: bool, link: Link, xcode: bool) -> bool {
+    on && !xcode && matches!(link, Link::Usb { .. })
+}
+
 /// The setting is read back only on the cable: turned off over Wi-Fi, the device drops the connection that would
 /// read it (observed 2026-11-12, "device socket io failed", with the setting off).
 async fn flow(home: &Path, on: bool, wanted: Option<&str>) -> Result<String, String> {
     let attached = attached(home).await?;
     let device = pick(&attached, wanted)?;
+    let hinted = |e: phonedriver_core::error::Error| format!("{e}. {}", e.hint());
+    if on
+        && !phonedriver_ios::setup::XCODE
+        && matches!(device.link, Link::Network { .. })
+        && phonedriver_ios::remote::read(home, &device.udid).is_none()
+    {
+        return Err(hinted(phonedriver_core::error::Error::NeedsUser {
+            action: phonedriver_core::error::UserAction::PairForWifi,
+        }));
+    }
     transport::allow_network(device, on).await.map_err(|e| {
         let e = transport::classify(&name(device), &e);
         format!("{e}. {}", e.hint())
@@ -74,9 +90,15 @@ async fn flow(home: &Path, on: bool, wanted: Option<&str>) -> Result<String, Str
             ));
         }
     }
+    if pairs(on, device.link, phonedriver_ios::setup::XCODE) {
+        phonedriver_ios::remote::pair(device, home)
+            .await
+            .map_err(hinted)?;
+    }
     match on {
         true => lan::remember(home, &device.udid),
-        false => lan::forget(home, &device.udid),
+        false => lan::forget(home, &device.udid)
+            .and_then(|()| phonedriver_ios::remote::forget(home, &device.udid)),
     }
     .map_err(|e| e.to_string())?;
     Ok(done(device, on))
@@ -138,6 +160,7 @@ mod tests {
         Link::Network {
             addr: "192.168.1.20".parse().unwrap(),
             scope: None,
+            pairing: None,
         }
     }
 
@@ -165,6 +188,14 @@ mod tests {
             "more than one iOS device is attached (ios:A, ios:B); pass --device with one of them"
         );
         assert!(pick(&both, Some("ios:C")).unwrap_err().contains("ios:C"));
+    }
+
+    #[test]
+    fn off_a_mac_turning_it_on_over_the_cable_also_pairs_for_wifi() {
+        assert!(pairs(true, USB, false));
+        assert!(!pairs(true, USB, true));
+        assert!(!pairs(true, wifi(), false));
+        assert!(!pairs(false, USB, false));
     }
 
     #[test]
