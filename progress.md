@@ -3417,3 +3417,10 @@ Live, the same phone, release build, read-only (no taps):
 - idevice comes from `hridaya423/idevice` (branch `phonedriver-run-over-rsd`), a copy of Coreho's commit `3bd5d45` on v0.1.68 under the project's own account, so a build does not depend on a contributor's repository.
 - Windows gives a program's first thread 1 MB of stack; #30's debug build overflowed it before reading its arguments (28 of 30 `--test cli` failures on CI), and #29 had seen `doctor` overflow it with a phone on Wi-Fi. `phonedriver` now runs on a thread with a 16 MB stack.
 
+
+## 2026-11-20: 0.1.6 released
+
+- Tag `v0.1.6` on `eafd87de` (#29 merged). Release run 44831794998: every job passed (`plan`, `agent-jar`, `runner-ipa`, five `build-local-artifacts`, `build-global-artifacts`, `host`, `publish-homebrew-formula`, `announce`). The release has the five archives with their `.sha256`, the two installers, `phonedriver.rb` and `PhonedriverRunner.ipa`.
+- Checked from the release: `shasum -a 256 -c phonedriver-aarch64-apple-darwin.tar.gz.sha256` gave `OK`, and the binary printed `phonedriver 0.1.6`. `releases/latest/download/PhonedriverRunner.ipa` answered 200.
+- Site (`2c69ef43`): the version lines, and four pages that lagged: the iPhone page said an iPhone needs a Mac and now has the Windows steps; the privacy page lists the `--download-ddi` fetch; the Simulator page has `apps notify` and `wait log`; the web page doc says how a tap meets a page's fixed bar. Built on the mini: `scripts/check.mjs` gave `problems 0`. Live after the deploy: `/docs/install/` says `current release is phonedriver 0.1.6`, and `/docs/iphone/` has `id="iphone-from-windows"`.
+- npm package dry run from the tag: `phonedriver@0.1.6`, 5 files, 17.3 kB; `npm test` in `packaging/npm`: 7 passed. npm and the MCP registry entry are published by the maintainer.
