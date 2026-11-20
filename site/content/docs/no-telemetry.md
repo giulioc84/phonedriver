@@ -4,10 +4,10 @@ nav: No telemetry
 seo: Does phonedriver send telemetry? No, and a test proves it
 meta: phonedriver sends no telemetry. Every connection it makes, the sandbox test that fails if one is added, and how mobile-mcp and phone-harness differ.
 description: phonedriver sends no telemetry and no usage data. This page lists every connection it makes, the test that fails if anyone adds another, where logs and traces are kept, and how to check it yourself.
-updated: 2026-11-12
+updated: 2026-11-20
 ---
 
-phonedriver sends no telemetry: no install id, no usage events, no crash reports. After the first download of the binary, it talks to your device and to nothing else, with one exception for iPhones that is listed below. An agent that drives your phone sees your messages, your photos and your bank's login screen, so this is a rule of the project and not a setting.
+phonedriver sends no telemetry: no install id, no usage events, no crash reports. After the first download of the binary, it talks to your device and to nothing else, with the exceptions for iPhones that are listed below. An agent that drives your phone sees your messages, your photos and your bank's login screen, so this is a rule of the project and not a setting.
 
 ## Every connection phonedriver makes
 
@@ -19,6 +19,7 @@ phonedriver sends no telemetry: no install id, no usage events, no crash reports
 | Multicast DNS on the local network, and the iPhone's address | Only after `phonedriver ios wifi on`, to find and reach that iPhone | No |
 | The iOS Simulator | Simulators | No |
 | Apple's signing server | Mounting a developer disk image on a physical iPhone | Yes, to Apple |
+| GitHub, `doronz88/DeveloperDiskImage` at a pinned commit | Only `phonedriver ios setup --download-ddi`, once, to fetch the iPhone developer disk image off a Mac; each file is checked against a pinned SHA-256 | Yes, to GitHub |
 | GitHub Releases | The first `npx -y phonedriver` run of a version, to download the binary | Yes, to GitHub |
 
 That is the whole list. There is no update check, no analytics endpoint and no error upload.
@@ -42,7 +43,8 @@ The daemon starts as a child of the command, so it is inside the sandbox too. A 
 
 - It runs on macOS only. Linux has no equivalent that keeps a local fake server reachable from inside the sandbox.
 - The session in the test has no real device and no iOS disk image mount, so the Apple exception is checked by reading the code, not by the sandbox.
-- A DNS lookup through the system resolver is not a connection and would not be caught. phonedriver resolves no names: adb and usbmuxd are addresses.
+- A DNS lookup through the system resolver is not a connection and would not be caught. phonedriver resolves no names (adb and usbmuxd are addresses), except for the `--download-ddi` fetch, which `curl` makes.
+- The `--download-ddi` fetch runs only when you ask for it, so the test does not run it.
 
 ## What stays on your machine
 

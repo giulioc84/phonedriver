@@ -3,7 +3,7 @@ title: How to read a web page on Android as text with phonedriver page
 nav: Read a web page
 meta: phonedriver page prints the whole web page in front on an Android phone as text in one call, from Chrome or a debug build's web view, with no scrolling.
 description: phonedriver page prints the web page in front on an Android phone as text, whole and in one call, from Chrome or a debug build's web view. How to narrow it, how it works in MCP, and what it cannot read.
-updated: 2026-11-18
+updated: 2026-11-20
 date: 2026-11-18
 ---
 
@@ -42,6 +42,7 @@ On an Android 17 emulator, the mobile Wikipedia article on Ada Lovelace (83 line
 - **Chrome**, and **a web view inside an app that is a debug build** or that turned web debugging on. phonedriver reads through the debugging socket those apps open on the phone, over the adb connection it already has. It opens no port on your computer.
 - Any other app answers that it has no page that can be read. Use `phonedriver snapshot` there.
 - It only reads. Taps and typing still go through the screen, so the [approval guard](/docs/approval-guard/) sees every button an agent presses on a web page.
+- A page's fixed bottom bar, such as a site's tab bar in Chrome, counts as covering what is under it. A tap on something partly under the bar goes to the part that shows, and one fully under it fails with `covered_by: "page's bar"` instead of tapping the bar.
 - iOS has no equivalent yet.
 
 The design is decision D71 in [the repository]({{REPO}}/blob/main/docs/decisions.md).

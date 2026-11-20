@@ -4,7 +4,7 @@ nav: iOS Simulator
 meta: Boot an iPhone Simulator on a Mac and let an agent drive it with phonedriver. Needs Xcode. Covers the runner build and tap latency.
 description: Boot an iPhone Simulator on a Mac and let an agent drive it with phonedriver. Needs Xcode. Covers the first-run runner build and the Simulator's tap latency.
 seo: How to let an AI agent control the iOS Simulator over MCP
-updated: 2026-11-18
+updated: 2026-11-20
 ---
 
 To let an AI agent control the iOS Simulator, boot a Simulator on a Mac with Xcode and add phonedriver to your agent as an MCP server. The agent reads the screen as text through an XCTest runner that phonedriver builds for you, and its taps go to the Simulator's own touch input.
@@ -42,6 +42,12 @@ The first command that needs the runner builds a small XCTest runner on your Mac
 ## Use the shell
 
 `phonedriver shell "simctl ui appearance dark"` fills in the device for `simctl` subcommands, and runs anything else inside the Simulator. iOS 26 Simulators have no shell, so a command is one of their own programs, such as `defaults` or `log`. See [the shell](/docs/shell/).
+
+## Push notifications and logs
+
+`phonedriver apps notify <app> '{"aps":{"alert":"Hi"}}'` (or `--file payload.json`) sends the app a push notification, which the Simulator delivers the way Apple's push service would. The app must have asked for notification permission, and a payload without an `aps` object is refused.
+
+`phonedriver wait log:"signed in|ready" --app <app>` follows the Simulator's log from that moment and returns the first line with one of the words. The line is masked like every reply. See [testing your app](/docs/test-a-mobile-app/).
 
 ## Speed
 

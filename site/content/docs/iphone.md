@@ -1,12 +1,12 @@
 ---
 title: How to control a real iPhone or iPad with phonedriver
 nav: Real iPhone
-description: Set up an iPhone or iPad and let an agent drive it with phonedriver, with or without the cable. Tested on an iPhone 13 Pro Max, a 14 Plus and an iPad Pro.
-updated: 2026-11-14
+description: Set up an iPhone or iPad and let an agent drive it with phonedriver, from a Mac or from Windows, with or without the cable. Tested on an iPhone 13 Pro Max, a 14 Plus, a 16e and an iPad Pro.
+updated: 2026-11-20
 seo: How to let an AI agent control a real iPhone or iPad over MCP
 ---
 
-To let an AI agent control a real iPhone or iPad, plug it into a Mac with Xcode and run `phonedriver ios setup`. The agent then reads the screen as text and taps, types and swipes through phonedriver's own XCTest runner. The runner is signed with your Apple developer team. A free Apple ID works. Its signature lasts 7 days, and the next command after that signs the runner again by itself.
+To let an AI agent control a real iPhone or iPad, plug it into a Mac with Xcode and run `phonedriver ios setup`, or from Windows follow [iPhone from Windows](#iphone-from-windows). The agent then reads the screen as text and taps, types and swipes through phonedriver's own XCTest runner. The runner is signed with your Apple developer team. A free Apple ID works. Its signature lasts 7 days, and the next command after that signs the runner again by itself.
 
 I tested an iPhone 14 Plus (iOS 26.1) and an iPad Pro (iOS 27.0) through the CLI and MCP. Screenshots, snapshots and the diff after a tap meet the targets I set. A bare tap does not: it takes 454 to 534 ms at p50 against a target of 80 ms. The 12-scenario suite was not run on devices.
 
@@ -24,6 +24,19 @@ phonedriver --device ios:<udid> snapshot
 Without a team, the command stops with exit code 3 and says so. If the iPhone has never been used with that team, the command asks for `phonedriver ios register`. That lets Xcode add the iPhone to the team's Apple developer account, which holds 100 iPhones a year. If you set `PHONEDRIVER_TEAM`, run `phonedriver daemon stop` afterwards: the daemon reads it when it starts.
 
 Mounting the developer disk image is the one thing phonedriver does that talks to Apple. Nothing else leaves your machine.
+
+## iPhone from Windows
+
+phonedriver drives an iPhone or iPad on iOS 17 or later from Windows, with no Mac. Xcode is what builds the runner on a Mac, so on Windows you install a runner built for each release instead:
+
+1. Install **Apple Devices** from the Microsoft Store (or iTunes). Plug the phone in, unlock it and tap Trust.
+2. Download `PhonedriverRunner.ipa` from the release of the phonedriver you run ([the latest]({{REPO}}/releases/latest/download/PhonedriverRunner.ipa); `phonedriver doctor` gives the link for yours). GitHub's macOS machines build it unsigned with each release.
+3. Install it with [Sideloadly](https://sideloadly.io), signed with your Apple ID. A free Apple ID's signature lasts 7 days, and Sideloadly can sign it again. phonedriver never sees your Apple ID. On the phone, trust it under Settings > General > VPN & Device Management.
+4. Turn on Settings > Privacy & Security > Developer Mode and restart the phone.
+5. Run `phonedriver ios setup --download-ddi`. It downloads Xcode 27.2's developer disk image once from [doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage) at a pinned commit, checks each file's SHA-256, and mounts it. With the three files from a Mac's Xcode, use `--ddi <folder>` instead. Then it finds the runner and starts it.
+6. Optional: with the phone still plugged in and unlocked, `phonedriver ios wifi on`, then unplug it. It stays in `phonedriver devices` while both are on the same network and the phone is awake.
+
+Tested on an iPhone 16e (iOS 26.5) from Windows 11. On the cable: setup, `snapshot`, `screenshot`, `tap`, `type` and `press back`. Over Wi-Fi: `doctor`, `snapshot`, `screenshot`, `apps`, `launch`, `tap` and `press back`. A tap takes 1.3 to 1.5 s there, against 0.45 to 0.53 s from a Mac, because the screen's settle is read from polled screenshots. A locked phone drops off Wi-Fi now and then, and the next command connects again in 10 to 19 s. Linux takes the same path with usbmuxd, but it has not been tried on a phone.
 
 ## Without the cable
 
@@ -75,7 +88,7 @@ No. A free Apple ID works. Its signature lasts 7 days; when it has run out, the 
 
 ### Can I control an iPhone from Windows or Linux?
 
-No. The runner is built and signed with Xcode, so an iPhone or the iOS Simulator needs a Mac. Android devices work from macOS, Linux and Windows.
+From Windows, yes, on the cable or over Wi-Fi: see [iPhone from Windows](#iphone-from-windows). Linux runs the same code but is untested on a phone. The iOS Simulator still needs a Mac.
 
 ### Can the agent unlock my iPhone?
 
