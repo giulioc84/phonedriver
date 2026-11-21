@@ -3424,3 +3424,8 @@ Live, the same phone, release build, read-only (no taps):
 - Checked from the release: `shasum -a 256 -c phonedriver-aarch64-apple-darwin.tar.gz.sha256` gave `OK`, and the binary printed `phonedriver 0.1.6`. `releases/latest/download/PhonedriverRunner.ipa` answered 200.
 - Site (`2c69ef43`): the version lines, and four pages that lagged: the iPhone page said an iPhone needs a Mac and now has the Windows steps; the privacy page lists the `--download-ddi` fetch; the Simulator page has `apps notify` and `wait log`; the web page doc says how a tap meets a page's fixed bar. Built on the mini: `scripts/check.mjs` gave `problems 0`. Live after the deploy: `/docs/install/` says `current release is phonedriver 0.1.6`, and `/docs/iphone/` has `id="iphone-from-windows"`.
 - npm package dry run from the tag: `phonedriver@0.1.6`, 5 files, 17.3 kB; `npm test` in `packaging/npm`: 7 passed. npm and the MCP registry entry are published by the maintainer.
+
+## 2026-11-21: a dropped text field is named by D33's rules
+
+- `Session::gone_field_named` matched a dropped field when its label merely contained the target (`contains`), so `type --into net`, which finds nothing on screen by D33, scrolled to a dropped "Network" field and typed into it. It now runs `find_text`'s two steps: the whole normalized label, then `holds_as_words` with `EXTRA_WORDS`. Several different fields matching is still no match.
+- Test first: `a_dropped_field_is_named_by_whole_words_as_a_visible_one_is` failed before the change at `assert!(s.gone_field_named("net").is_none())`. After: `cargo test -p phonedriver --lib daemon::session` 19 passed; `cargo test -p phonedriver` all suites passed. The live Android suite was not run (host-side change only).
